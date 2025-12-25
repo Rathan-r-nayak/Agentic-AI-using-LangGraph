@@ -1,0 +1,6 @@
+/langgraph_env/
+.env
+**/data/*
+!**/data/.gitkeep
+*.jpeg
+*.bin
