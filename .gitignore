@@ -4,3 +4,5 @@
 !**/data/.gitkeep
 *.jpeg
 *.bin
+**/__pycache__/*
+**/langsmith_env/*
