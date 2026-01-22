@@ -642,3 +642,41 @@ Improve an answer until quality threshold is met.
 ```
 ![alt text](image-2.png)
 This is controlled looping, not autonomous behavior.
+
+## Workflows
+### 1.Sequential Workflows: 
+  Tasks are executed one after another in a specific, linear order.
+
+### 2.Parallel Workflows: 
+  Multiple tasks are executed simultaneously across different branches.
+
+### 3.Conditional Workflows: 
+  The path of execution is determined by a decision or criteria, leading to different outcomes.
+
+### 4.Iterative Workflows: 
+  A set of tasks is repeated multiple times in a loop until a specific condition is met.
+
+![alt text](image-12.png)
+
+## Langgraph Persistant
+### 1.Saves State: 
+  Allows AI agents to save and retrieve their state throughout a workflow instead of forgetting data once a task ends.
+
+### 2.Checkpointing System: 
+  Implements a system where every intermediate step is securely stored in a database.
+
+### 3.Fault Tolerance: 
+  Ensures systems can resume from the exact point of a crash rather than starting over.
+
+### 4.Short-Term Memory: 
+  Enables chatbots to remember context, allowing users to revisit past conversations via unique thread IDs.
+
+### 5.Human-in-the-Loop: 
+  Allows processes to pause for manual human approval before continuing.
+
+### 6.Time Travel: 
+  Facilitates debugging by allowing developers to revisit specific execution points in the past.
+
+### 7.Enhanced Development: 
+  empowers the creation of more reliable, complex, and interactive AI applications.
+![alt text](image-6.png)
