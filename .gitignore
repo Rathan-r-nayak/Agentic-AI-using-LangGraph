@@ -4,5 +4,11 @@
 !**/data/.gitkeep
 *.jpeg
 *.bin
-**/__pycache__/*
+*/__pycache__/
 **/langsmith_env/*
+*.toml
+*.python-version
+*.lock
+*.ipynb_checkpoints
+*.vscode
+*.venv
