@@ -1116,3 +1116,36 @@ It separates:
 * Execution (Servers)
 * Communication (Client)
 * Transport (Network/stdio)
+
+---
+
+## LLMs Don’t Have Memory — So How Do They Remember
+
+* **The Core Problem:** LLMs are inherently stateless. At their core, they are just mathematical functions, represented as $y = f_{\theta}(x)$, where the output depends entirely on fixed parameters and the current input. They have no built-in memory.
+* **The Workaround:** Developers create the *illusion* of memory using the LLM's Context Window (how much text it can process at once) and In-Context Learning (its ability to read the prompt for instructions).
+* **Short-Term Memory (STM):** This involves attaching your entire conversation history to every new message you send. 
+    * *Drawbacks:* It only lasts for that single chat session, can crash if the server resets, and easily maxes out the token limit.
+* **Long-Term Memory (LTM):** A more advanced, permanent solution. Important details are extracted from your chats and saved in an external database. 
+    * *How it works:* When you start a new chat, the system searches the database for relevant past information (like facts, past events, or your preferences) and secretly injects them into your current prompt so the LLM "knows" them.
+
+### Example Scenario: A Coding Assistant
+
+Imagine you are using an AI to help you write software.
+
+**1. The Stateless Baseline (No Memory):**
+You ask the AI, "Write a script to scrape a website." The AI generates the script in JavaScript. Because it is stateless, if you follow up with, "Make it asynchronous," it won't know what "it" refers to. 
+
+**2. Short-Term Memory (STM) in Action:**
+Because the chatbot uses STM, it sends your first prompt, its JavaScript response, and your new "Make it asynchronous" prompt all together. The LLM reads the history, understands the context, and updates the script. However, if you close the chat window, the AI forgets everything.
+
+**3. Long-Term Memory (LTM) in Action:**
+During that chat, the system's LTM extracted a **Semantic Memory**: *"This user writes web scrapers in JavaScript."* Two weeks later, you open a brand new chat and say, "Write a script to sort my files." Before the LLM sees your prompt, the LTM system retrieves your preference from its database and injects it. The LLM then automatically provides the file-sorting script in JavaScript, even though you never specified the language in this new session.
+
+
+![alt text](image-18.png)
+---
+
+
+## Corrective RAG
+
+![alt text](image-19.png)
