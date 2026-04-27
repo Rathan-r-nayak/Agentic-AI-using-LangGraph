@@ -1,4 +1,17 @@
 # %%
+import os
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+
+import warnings
+warnings.filterwarnings("ignore", message=".*Accessing `__path__` from .*")
+warnings.simplefilter("ignore") # Ignore all warnings during import
+
+import logging
+# Suppress transformers logging
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+
 from youtube_transcript_api import YouTubeTranscriptApi
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -10,13 +23,36 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain_community.tools import DuckDuckGoSearchRun
 from langgraph.graph import StateGraph, START,END
-from typing import TypedDict, Literal, List
+from typing import TypedDict, Literal, List, Annotated
 from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
+from psycopg_pool import ConnectionPool
+from langgraph.checkpoint.postgres import PostgresSaver
+from pydantic import BaseModel
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import BaseMessage
+from langgraph.graph import add_messages
 import re
 import requests
 import uuid
 import hashlib
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+DB_URI = "postgresql://postgres:postgres@localhost:5432/postgres"
+
+pool = ConnectionPool(
+    conninfo=DB_URI,
+    max_size=20,
+)
+
+checkpointer = PostgresSaver(pool)
+checkpointer.setup() 
 
 # %%
 load_dotenv()
@@ -26,9 +62,9 @@ load_dotenv()
 def get_db_name():
     # db_name = "./chroma_vector_store_yt"
     db_name = "./chroma_vector_store_yt_hf"
+    return db_name
 
 def get_embeddings():
-    
     return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     # return GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
 
@@ -43,12 +79,14 @@ class ChatState(TypedDict):
     query : str
     url : str
     title: str
+    need_retrieval: bool
     is_upload : bool
     documents: List[Document]
     video_id: str
     web_search_needed: bool
     search_query: str
     answer: str
+    messages: Annotated[list[BaseMessage], add_messages]
 
 # %%
 def fetch_youtube_title(url: str) -> str:
@@ -66,7 +104,7 @@ def fetch_youtube_title(url: str) -> str:
         return data.get("title", "Unknown Title")
         
     except Exception as e:
-        print(f"Error fetching title: {e}")
+        logger.error(f"Error fetching title: {e}")
         return "Unknown Title"
 
 # %%
@@ -92,7 +130,7 @@ def fetch_youtube_transcript(url: str) -> str:
         return full_text
 
     except Exception as e:
-        print(f"Error fetching transcript: {e}")
+        logger.error(f"Error fetching transcript: {e}")
         return None
 
 def get_video_id_match(url):
@@ -102,18 +140,18 @@ def get_video_id_match(url):
 
 # %%
 def upload_document(state: ChatState):
-    print("--- 1. UPLOADIG THE DOCUMENTS ---")
+    logger.info("--- 1. UPLOADING THE DOCUMENTS ---")
     url = state["url"]
     match = get_video_id_match(url)
     if not match:
         raise ValueError("Could not find a valid YouTube Video ID in the provided URL.")
     video_id = match.group(1)
-    print(f"   -> getting the transcript for video with id : {video_id}")
+    logger.info(f"   -> getting the transcript for video with id : {video_id}")
 
     transcript = fetch_youtube_transcript(url)
     title = fetch_youtube_title(url)
 
-    print(f"   -> fetching of the data completed video_id : {video_id}, title: {title}")
+    logger.info(f"   -> fetching of the data completed video_id : {video_id}, title: {title}")
     if transcript:
         doc = Document(page_content=transcript, metadata={"source": url})
         
@@ -138,30 +176,63 @@ def upload_document(state: ChatState):
             ids=ids,
             persist_directory=get_db_name()
         )
-        print("----------------------------------------------------------")
+        logger.info("--- DOCUMENT UPLOADING COMPLETED ---")
         return {"title": title, "video_id": video_id} # Update the state
     else:
-        print(f"Warning: No transcript found for {url}")
-        print("----------------------------------------------------------")
+        logger.warning(f"Warning: No transcript found for {url}")
+        logger.info("--- DOCUMENT UPLOADING FAILED ---")
         return {"title": title, "video_id": video_id}
+    
+# %%
+
+
+
+def decide_retrieval(state: ChatState):
+    logger.info("--- DECIDING RETRIEVAL ---")
+    class RetrieveDecision(BaseModel):
+        need_retrieval: bool  = Field(description="true if external documents are needed to answer reliably, else false.")
+
+    decide_retrieval_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "You decide whether retrieval is needed.\n"
+                "Return JSON that matches this schema:\n"
+                "{{'should_retrieve': boolean}}\n\n"
+                "Guidelines:\n"
+                "- should_retrieve=true if answering requires specific facts, citations, or info likely not in the model.\n"
+                "- should_retrieve=false for general explanations, definitions, or reasoning that doesn't need sources.\n"
+                "- If unsure, choose true."
+            ),
+            ("human", "Question: {question}"),
+        ]
+    )
+
+    llm = get_llm().with_structured_output(RetrieveDecision)
+    decision: RetrieveDecision = llm.invoke(decide_retrieval_prompt.format_messages(question=state["query"]))
+
+    logger.info(f"   -> Retrieval needed: {decision.need_retrieval}")
+    return {"need_retrieval": decision.need_retrieval}
+
+
 
 # %%
 def retrive_document(state: ChatState):
-    print("--- 2. RETRIVING THE DOCUMENTS FROM VECTOR DB ---")
+    logger.info("--- 2. RETRIVING THE DOCUMENTS FROM VECTOR DB ---")
     vector_db = Chroma(
         embedding_function = get_embeddings(),
         persist_directory = get_db_name()
     )
     retirver = vector_db.as_retriever()
-    print(f"   -> retriving the documents with query : {state['query']}")
+    logger.info(f"   -> retriving the documents with query : {state['query']}")
     documents = retirver.invoke(state['query'])
-    print("----------------------------------------------------------")
+    logger.info("--- RETRIVAL COMPLETED ---")
     return {"documents": documents}
 
 # %%
 def grade_documents(state: ChatState):
     """Uses an LLM to grade if the retrieved documents are actually relevant."""
-    print("--- 3. GRADING DOCUMENTS ---")
+    logger.info("--- 3. GRADING DOCUMENTS ---")
     question = state["query"]
     documents = state["documents"]
 
@@ -183,22 +254,25 @@ def grade_documents(state: ChatState):
     
     grader_chain = prompt | structured_llm
 
-    doc_text = documents[0].page_content if documents else ""
-    score = grader_chain.invoke({"question": question, "document": doc_text})
+    doc_text = []
+    for doc in documents:
+        doc_text.append(doc.page_content if doc else "")
+    # doc_text = documents[0].page_content if documents else ""
+    score = grader_chain.invoke({"question": question, "document": "\n".join(doc_text)})
 
-    print(f"   -> grade score: {score.binary_score}")
-    print("----------------------------------------------------------")
+    logger.info(f"   -> grade score: {score.binary_score}")
+    logger.info("--- GRADING COMPLETED ---")
     if score.binary_score == "yes":
-        # print("   -> Grade: RELEVANT. Proceeding to generation.")
+        # logger.info("   -> Grade: RELEVANT. Proceeding to generation.")
         return {"web_search_needed": False}
     else:
-        # print("   -> Grade: IRRELEVANT. Fallback required.")
+        # logger.info("   -> Grade: IRRELEVANT. Fallback required.")
         return {"web_search_needed": True}
 
 # %%
 def rewrite_query(state: ChatState):
     """Rewrites the user's original question into an optimized web search query."""
-    print("--- 4. REWRITING QUERY FOR WEB SEARCH ---")
+    logger.info("--- 4. REWRITING QUERY FOR WEB SEARCH ---")
     query = state["query"]
 
 
@@ -221,49 +295,95 @@ def rewrite_query(state: ChatState):
     rewrite_chain = prompt | structred_llm
     result = rewrite_chain.invoke({"query": query})
 
-    print(f"   -> Original: {query}")
-    print(f"   -> Rewritten: {result.query}")
-    print("----------------------------------------------------------")
+    logger.info(f"   -> Original: {query}")
+    logger.info(f"   -> Rewritten: {result.query}")
+    logger.info("--- QUERY REWRITING COMPLETED ---")
     # Update the state with the new search query
     return {"search_query": result.query}
 
 # %%
 def web_search(state: ChatState):
     """Fallback tool using the optimized search query."""
-    print("--- 5. PERFORMING WEB SEARCH ---")
+    logger.info("--- 5. PERFORMING WEB SEARCH ---")
     search_tool = DuckDuckGoSearchRun()
     # search_tool.invoke("apollo tyres share price")
 
     optimized_query = state['search_query']
 
-    print(f"   -> Searching the web for: '{optimized_query}'")
+    logger.info(f"   -> Searching the web for: '{optimized_query}'")
     
     search_result = search_tool.invoke(optimized_query)
     new_doc = Document(page_content=search_result)
-    print(f"   -> Web response: '{search_result}'")
-    print("-----------------new_doc-----------------------------------------")
+    logger.info(f"   -> Web response length: {len(search_result)}")
+    logger.info("--- WEB SEARCH COMPLETED ---")
     return {"documents": [new_doc]}
 
 # %%
+from langchain_core.prompts import MessagesPlaceholder
+
 def generate(state: ChatState):
     """Generates the final answer."""
-    print("--- 6. GENERATING FINAL ANSWER ---")
+    logger.info("--- 6. GENERATING FINAL ANSWER ---")
     documents = state['documents']
     query = state['query']
     docs_text = "\n\n".join([doc.page_content for doc in documents])
+    chat_history = state.get("messages", [])
 
     llm = get_llm()
-
-    prompt = PromptTemplate.from_template(
-        "Answer the question based strictly on the context below.\n\nContext: {context}\n\nQuestion: {question}\n\nAnswer:"
-    )
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "Answer the user's question based strictly on the provided context: {context}"),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{question}"),
+    ])
 
     chain = prompt | llm
-    response = chain.invoke({"context": docs_text, "question": query})
+    response = chain.invoke({
+        "context": docs_text,
+        "question": query,
+        "chat_history": chat_history
+    })
 
-    print(f"   -> response {response.content}")
-    print("----------------------------------------------------------")
-    return {"answer": response.content}
+    # prompt = PromptTemplate.from_template(
+    #     "Answer the question based strictly on the context below.\n\nContext: {context}\n\nQuestion: {question}\n\nAnswer:"
+    # )
+
+    # response = chain.invoke({"context": docs_text, "question": query})
+
+    logger.info(f"   -> response generated (length: {len(response.content)})")
+    logger.info("--- GENERATION COMPLETED ---")
+    return {"answer": response.content, "messages": [response]}
+
+
+# %%
+
+
+def generate_direct(state: ChatState):
+    logger.info("--- GENERATING DIRECT ANSWER ---")
+    messages = state.get("messages", [])
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a helpful assistant. Use the conversation history to stay in context.Answer using only your general knowledge.If it requires specific company info, say: 'I don't know based on my general knowledge.'"),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{question}"),
+    ])
+
+
+    # direct_generation_prompt = ChatPromptTemplate.from_messages(
+    #     [
+    #         (
+    #             "system",
+    #             "Answer using only your general knowledge.\n"
+    #             "If it requires specific company info, say:\n"
+    #             "'I don't know based on my general knowledge.'"
+    #         ),
+    #         ("human", "{question}"),
+    #     ]
+    # )
+
+    out = get_llm().invoke(prompt.format_messages(question=state["query"], chat_history=messages))
+    logger.info("--- DIRECT GENERATION COMPLETED ---")
+    return {"answer": out.content}
+
 
 # %%
 def route_after_grade(state: ChatState)-> Literal["rewrite_query", "generate"]:
@@ -273,25 +393,69 @@ def route_after_grade(state: ChatState)-> Literal["rewrite_query", "generate"]:
         return "generate"
 
 # %%
-def route(state: ChatState) -> Literal["upload", "retrive_document"]:
+def route(state: ChatState) -> Literal["upload", "decide_retrieval"]:
     if state.get("is_upload"):
         return "upload"
     
     # Otherwise, skip the upload and go straight to retrieving answers
-    return "retrive_document"
+    return "decide_retrieval"
+
 
 # %%
+
+
+def route_for_retrive(state: ChatState) -> Literal["retrive_document", "generate_direct"]:
+    if state.get("need_retrieval"):
+        return "retrive_document"
+    
+    return "generate_direct"
+# %%
+
+def get_uploaded_videos_from_chroma() -> list[str]:
+    """Retrieves a list of unique video titles directly from ChromaDB."""
+    try:
+        # Connect to your existing database
+        vector_db = Chroma(
+            embedding_function=get_embeddings(),
+            persist_directory=get_db_name()
+        )
+
+        db_data = vector_db.get(include = ["metadatas"])
+        all_metadatas = db_data.get("metadatas", [])
+
+        unique_titles = set()
+        for metadata in all_metadatas:
+            if metadata and "title" in metadata:
+                unique_titles.add(metadata["title"])
+                logger.info(f"Found video in DB: {metadata['title']}")
+                
+        # Return as a standard list
+        return list(unique_titles)
+        
+    except Exception as e:
+        logger.error(f"Error reading from ChromaDB: {e}")
+        return []
+
+
+# %%
+
 graph = StateGraph(ChatState)
 
 graph.add_node("upload", upload_document)
+graph.add_node("decide_retrieval", decide_retrieval)
 graph.add_node("retrive_document", retrive_document)
 graph.add_node("grade_documents", grade_documents)
 graph.add_node("rewrite_query", rewrite_query)
 graph.add_node("web_search", web_search)
 graph.add_node("generate", generate)
+graph.add_node("generate_direct", generate_direct)
 
 graph.add_conditional_edges(START, route)
 graph.add_edge("upload", END)
+
+
+graph.add_conditional_edges("decide_retrieval", route_for_retrive)
+graph.add_edge("generate_direct", END)
 graph.add_edge("retrive_document", "grade_documents")
 graph.add_conditional_edges("grade_documents", route_after_grade, {
         "rewrite_query": "rewrite_query",
@@ -303,4 +467,40 @@ graph.add_edge("web_search", "generate")
 
 graph.add_edge("generate", END)
 
-workflow = graph.compile()
+workflow = graph.compile(checkpointer=checkpointer)
+
+
+
+
+def load_chat_history(thread_id : str):
+    """Fetches past conversations from the LangGraph Postgres checkpointer."""
+    config = {"configurable": {"thread_id": thread_id}}
+
+    try:
+        history = list(workflow.get_state_history(config))
+        history.reverse()
+        
+        chat_messages = []
+        for snapshot in history:
+            # LangGraph saves a snapshot after EVERY node. 
+            # We only want the final state of each complete run (when 'next' is empty).
+            if not snapshot.next:
+                val = snapshot.values
+                
+                # We don't want to show video uploads as chat messages
+                if val.get("is_upload"):
+                    continue
+                    
+                q = val.get("query")
+                a = val.get("answer")
+                
+                # If both exist, it was a completed Q&A turn
+                if q and a:
+                    chat_messages.append({"role": "user", "content": q})
+                    chat_messages.append({"role": "assistant", "content": a})
+        
+        return chat_messages
+        
+    except Exception as e:
+        logger.error(f"Failed to load chat history: {e}")
+        return []
