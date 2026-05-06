@@ -33,6 +33,9 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import BaseMessage, HumanMessage, RemoveMessage
 from langgraph.graph import add_messages
 from langchain_core.prompts import MessagesPlaceholder
+from langchain_core.runnables import RunnableConfig
+from langgraph.store.base import BaseStore
+from langgraph.store.postgres import PostgresStore
 import re
 import requests
 import uuid
@@ -46,14 +49,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DB_URI = "postgresql://postgres:postgres@localhost:5432/postgres"
-
-pool = ConnectionPool(
-    conninfo=DB_URI,
-    max_size=20,
-)
-
-checkpointer = PostgresSaver(pool)
-checkpointer.setup() 
 
 # %%
 load_dotenv()
@@ -424,33 +419,65 @@ def web_search(state: ChatState):
 # %%
 
 
-def generate(state: ChatState):
+def generate(state: ChatState, config: RunnableConfig, store: BaseStore):
     """Generates the final answer."""
     logger.info("--- 6. GENERATING FINAL ANSWER ---")
     documents = state['documents']
-    query = state['query']
     docs_text = "\n\n".join([doc.page_content for doc in documents])
-    chat_history = state.get("messages", [])
 
-    llm = get_llm()
+    query = state['query']
+
+    chat_history = state.get("messages", [])
+    summary = state.get("summary", "")
+
+    user_id = config["configurable"].get("user_id", "default_user")
+    namespace = ("user",user_id, "details")
+    saved_memories = store.search(namespace)
+
+    if saved_memories:
+        memory_text = "\n".join(f"- {data.value['data']}" for data in saved_memories)
+    else:
+        memory_text = "No long-term facts known about this user yet."
+
+        
+
+    system_instruction = (
+        "You are an expert AI assistant tasked with answering questions strictly based on the provided context.\n\n"
+        "### USER PROFILE (Permanent Memory)\n"
+        "Here are facts you must remember about this specific user:\n"
+        "{memory_text}\n\n"
+    )
+    
+    if summary:
+        system_instruction += (
+            "### RECENT CONVERSATION SUMMARY\n"
+            f"{summary}\n\n"
+        )
+
+    system_instruction += (
+        "### RETRIEVED CONTEXT\n"
+        "{context}\n\n"
+        "### INSTRUCTIONS\n"
+        "- Answer the user's question STRICTLY based on the 'RETRIEVED CONTEXT' provided above.\n"
+        "- Personalize your response based on the 'USER PROFILE' when appropriate.\n"
+        "- Do not use your general training data to answer factual questions. If the answer is not contained in the RETRIEVED CONTEXT, explicitly state: 'I cannot answer this based on the provided documents.'\n"
+        "- Use the conversation history to maintain conversational flow."
+    )
+
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "Answer the user's question based strictly on the provided context: {context}"),
+        ("system", system_instruction),
         MessagesPlaceholder(variable_name="chat_history"),
         ("human", "{question}"),
     ])
 
-    chain = prompt | llm
+    chain = prompt | get_llm()
+    
     response = chain.invoke({
         "context": docs_text,
+        "memory_text": memory_text,
         "question": query,
         "chat_history": chat_history
     })
-
-    # prompt = PromptTemplate.from_template(
-    #     "Answer the question based strictly on the context below.\n\nContext: {context}\n\nQuestion: {question}\n\nAnswer:"
-    # )
-
-    # response = chain.invoke({"context": docs_text, "question": query})
 
     logger.info(f"   -> response generated (length: {len(response.content)})")
     logger.info("--- GENERATION COMPLETED ---")
@@ -460,30 +487,59 @@ def generate(state: ChatState):
 # %%
 
 
-def generate_direct(state: ChatState):
+def generate_direct(state: ChatState, config: RunnableConfig, store: BaseStore):
     logger.info("--- 2. GENERATING DIRECT ANSWER ---")
     messages = state.get("messages", [])
+    summary = state.get("summary", "")
+
+
+    user_id = config["configurable"].get("user_id", "default_user")
+    namespace = ("user",user_id, "details")
+    saved_memories = store.search(namespace)
+
+    if saved_memories:
+        memory_text = "\n".join(f"- {data.value['data']}" for data in saved_memories)
+    else:
+        memory_text = "No long-term facts known about this user yet."
+
+
+    system_instruction = (
+        "You are a helpful, intelligent assistant.\n\n"
+        "### USER PROFILE (Permanent Memory)\n"
+        "Here are facts you must remember about this specific user:\n"
+        "{memory_text}\n\n"
+    )
     
+    if summary:
+        system_instruction += (
+            "### RECENT CONTEXT (Short-Term Memory)\n"
+            f"{summary}\n\n"
+        )
+
+    system_instruction += (
+        "### INSTRUCTIONS\n"
+        "- Personalize your responses based on the User Profile when relevant.\n"
+        "- Use the conversation history to stay in context.\n"
+        "- Answer using ONLY your general knowledge.\n"
+        "- If a question requires specific, internal company data you do not have, explicitly say: 'I don't know based on my general knowledge.'"
+    )
+
+
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful assistant. Use the conversation history to stay in context.Answer using only your general knowledge.If it requires specific company info, say: 'I don't know based on my general knowledge.'"),
+        ("system", system_instruction),
         MessagesPlaceholder(variable_name="chat_history"),
         ("human", "{question}"),
     ])
 
+    chain = prompt | get_llm()
 
-    # direct_generation_prompt = ChatPromptTemplate.from_messages(
-    #     [
-    #         (
-    #             "system",
-    #             "Answer using only your general knowledge.\n"
-    #             "If it requires specific company info, say:\n"
-    #             "'I don't know based on my general knowledge.'"
-    #         ),
-    #         ("human", "{question}"),
-    #     ]
-    # )
+    out = chain.invoke({
+        "memory_text": memory_text,
+        "question": state["query"],
+        "chat_history": messages
+    })
 
-    out = get_llm().invoke(prompt.format_messages(question=state["query"], chat_history=messages))
+
     logger.info(f"   -> Direct response generated (length: {len(out.content)})")
     logger.info("--- DIRECT GENERATION COMPLETED ---")
     return {"answer": out.content, "messages": [out]}
@@ -584,6 +640,59 @@ def should_summarize(state: ChatState):
 
 # %%
 
+MEMORY_PROMPT = """You are responsible for updating and maintaining accurate user memory.
+
+CURRENT USER DETAILS (existing memories):
+{user_details_content}
+
+TASK:
+- Review the user's latest message.
+- Extract user-specific info worth storing long-term (identity, stable preferences, ongoing projects/goals).
+- For each extracted item, set is_new=true ONLY if it adds NEW information compared to CURRENT USER DETAILS.
+- If it is basically the same meaning as something already present, set is_new=false.
+- Keep each memory as a short atomic sentence.
+- No speculation; only facts stated by the user.
+- If there is nothing memory-worthy, return an empty list.
+"""
+
+def remember_node(state: ChatState, config: RunnableConfig, store: BaseStore):
+    logger.info("--- EXTRACTING LONG TERM MEMORY ---")
+
+    class MemoryDecision(BaseModel):
+        should_write: bool = Field(description="whether to store the data in long term memory")
+        memories : List[str] = Field(description="the details to be stored")
+
+
+    user_id = config["configurable"].get("user_id", "default_user")
+    namespace = ("user", user_id, "details")
+
+    message = state['messages'][-1].content
+    user_memory = store.search(namespace)
+
+    if user_memory:
+        user_memory_text = "\n".join(data.value["data"] for data in user_memory)
+    else:
+        user_memory_text = "No previous memory."
+
+
+    structured_llm = get_llm().with_structured_output(MemoryDecision)
+    decision = structured_llm.invoke(
+        [
+            MEMORY_PROMPT.format(user_details_content=user_memory_text),
+            {"role": "user", "content": message}
+        ]
+    )
+
+
+    if decision.should_write:
+        for memory in decision.memories:
+            logger.info(f"   -> SAVING FACT TO DB: {memory}")
+            # We use a UUID so each fact gets its own unique file in the folder
+            store.put(namespace=namespace, key=str(uuid.uuid4()), value={"data": memory})
+
+    return {}
+# %%
+
 graph = StateGraph(ChatState)
 
 graph.add_node("upload", upload_document)
@@ -597,10 +706,15 @@ graph.add_node("web_search", web_search)
 graph.add_node("generate", generate)
 graph.add_node("generate_direct", generate_direct)
 graph.add_node("summarize_conversation", summarize_conversation)
+graph.add_node("remember_node", remember_node)
+
 
 
 graph.add_conditional_edges(START, route)
 graph.add_edge("upload", END)
+
+graph.add_edge(START, "remember_node")
+graph.add_edge("remember_node", END)
 
 
 graph.add_conditional_edges("decide_retrieval", route_for_retrieve)
@@ -647,7 +761,20 @@ graph.add_conditional_edges(
 graph.add_edge("summarize_conversation", END)
 
 
-workflow = graph.compile(checkpointer=checkpointer)
+
+pool = ConnectionPool(
+    conninfo=DB_URI,
+    max_size=20,
+    kwargs={"autocommit": True}
+)
+
+checkpointer = PostgresSaver(pool)
+checkpointer.setup() 
+
+store = PostgresStore(pool)
+store.setup()
+
+workflow = graph.compile(checkpointer=checkpointer, store=store)
 
 
 

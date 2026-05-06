@@ -47,7 +47,7 @@ with st.sidebar:
             logger.info(f"Processing video URL: {url_input}")
             with st.spinner("Extracting transcript & saving to ChromaDB..."):
                 try:
-                    config = {"configurable": {"thread_id": "my_first_conversation"}}
+                    config = {"configurable": {"thread_id": "my_first_conversation", "user_id": "rathan_001"}}
 
                     # Trigger the upload node in your LangGraph!
                     result = workflow.invoke({
