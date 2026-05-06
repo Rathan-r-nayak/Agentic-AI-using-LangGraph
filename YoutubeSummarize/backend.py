@@ -30,8 +30,9 @@ from psycopg_pool import ConnectionPool
 from langgraph.checkpoint.postgres import PostgresSaver
 from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage, RemoveMessage
 from langgraph.graph import add_messages
+from langchain_core.prompts import MessagesPlaceholder
 import re
 import requests
 import uuid
@@ -74,6 +75,12 @@ def get_llm():
     return ChatGroq(model="llama-3.1-8b-instant")
     # return ChatGoogleGenerativeAI(model='models/gemini-2.5-flash')
 
+
+def merge_docs(left: List[Document], right: List[Document] | str) -> List[Document]:
+    if right == "CLEAR":
+        return []
+    return (left or []) + right
+
 # %%
 class ChatState(TypedDict):
     query : str
@@ -87,7 +94,12 @@ class ChatState(TypedDict):
     search_query: str
     answer: str
     messages: Annotated[list[BaseMessage], add_messages]
+    filtered_documents: Annotated[List[Document], merge_docs]
 
+
+class GradeWorkerState(TypedDict):
+    query: str
+    document: Document
 # %%
 def fetch_youtube_title(url: str) -> str:
     """Fetches the title of a YouTube video using the official OEmbed API."""
@@ -138,6 +150,8 @@ def get_video_id_match(url):
     match = re.search(pattern, url)
     return match
 
+
+
 # %%
 def upload_document(state: ChatState):
     logger.info("--- 1. UPLOADING THE DOCUMENTS ---")
@@ -182,10 +196,11 @@ def upload_document(state: ChatState):
         logger.warning(f"Warning: No transcript found for {url}")
         logger.info("--- DOCUMENT UPLOADING FAILED ---")
         return {"title": title, "video_id": video_id}
-    
+
+
+
+
 # %%
-
-
 
 def decide_retrieval(state: ChatState):
     logger.info("--- DECIDING RETRIEVAL ---")
@@ -196,13 +211,13 @@ def decide_retrieval(state: ChatState):
         [
             (
                 "system",
-                "You decide whether retrieval is needed.\n"
-                "Return JSON that matches this schema:\n"
-                "{{'should_retrieve': boolean}}\n\n"
-                "Guidelines:\n"
-                "- should_retrieve=true if answering requires specific facts, citations, or info likely not in the model.\n"
-                "- should_retrieve=false for general explanations, definitions, or reasoning that doesn't need sources.\n"
-                "- If unsure, choose true."
+                "You are a routing assistant. Your ONLY job is to decide whether retrieving external documents is necessary to answer the user's question.\n"
+                "Return JSON that matches this schema exactly:\n"
+                "{{'need_retrieval': boolean}}\n\n" 
+                "Strict Guidelines:\n"
+                "- need_retrieval=true for ANY question asking for facts, specific information, details about a video/document, or domain knowledge. Do not rely on your internal training data for facts.\n"
+                "- need_retrieval=false ONLY for generic greetings, conversational pleasantries, or questions about your identity as an AI (e.g., 'hello', 'hi', 'how are you', 'who are you').\n"
+                "- If there is even a 1% chance you need specific context, choose true."
             ),
             ("human", "Question: {question}"),
         ]
@@ -213,6 +228,8 @@ def decide_retrieval(state: ChatState):
 
     logger.info(f"   -> Retrieval needed: {decision.need_retrieval}")
     return {"need_retrieval": decision.need_retrieval}
+
+
 
 
 
@@ -227,7 +244,66 @@ def retrive_document(state: ChatState):
     logger.info(f"   -> retriving the documents with query : {state['query']}")
     documents = retirver.invoke(state['query'])
     logger.info("--- RETRIVAL COMPLETED ---")
-    return {"documents": documents}
+    return {"documents": documents, "filtered_documents": "CLEAR"}
+
+# %%
+
+from langgraph.types import Send
+def map_grading(state: ChatState):
+    logger.info(f"--- DISPATCHING {len(state['documents'])} PARALLEL GRADERS ---")
+
+    return [
+        Send("grade_single_document", {"query": state["query"], "document": doc}) for doc in state["documents"]
+    ]
+
+# %%
+def grade_single_document(state : GradeWorkerState):
+    class Grade(BaseModel):
+        binary_score: Literal["yes","no"] = Field(description="Relevance score 'yes' or 'no'")
+
+    llm = get_llm()
+    structured_llm = llm.with_structured_output(Grade)
+
+    prompt = PromptTemplate(
+        template="""You are a grader assessing relevance of a retrieved document to a user question. 
+        If the document contains keyword(s) or semantic meaning related to the question, grade it as relevant.
+        Return 'yes' if relevant, or 'no' if irrelevant.
+        
+        Retrieved document: \n\n {document} \n\n
+        User question: {question}""",
+        input_variables=["document", "question"],
+    )
+
+    chain = prompt | structured_llm
+
+    score = chain.invoke({"question": state['query'], "document": state["document"].page_content})
+
+
+    if score.binary_score == "yes":
+        # It's relevant! Toss it into the shared bucket.
+        return {"filtered_documents": [state["document"]]}
+    else:
+        # Irrelevant. Return an empty list (adds nothing to the bucket).
+        return {"filtered_documents": []}
+
+
+# %%
+
+def evaluate_grading_results(state: ChatState):
+    logger.info("--- 3. EVALUATING PARALLEL GRADING RESULTS ---")
+
+    good_docs = state.get("filtered_documents", [])
+
+    if len(good_docs) > 0:
+        logger.info(f"   -> {len(good_docs)} documents passed.")
+        # Overwrite the main documents list with ONLY the good ones
+        return {"documents": good_docs, "web_search_needed": False}
+    else:
+        logger.info("   -> 0 documents passed. Fallback required.")
+        return {"web_search_needed": True}
+        
+
+
 
 # %%
 def grade_documents(state: ChatState):
@@ -269,6 +345,9 @@ def grade_documents(state: ChatState):
         # logger.info("   -> Grade: IRRELEVANT. Fallback required.")
         return {"web_search_needed": True}
 
+
+
+
 # %%
 def rewrite_query(state: ChatState):
     """Rewrites the user's original question into an optimized web search query."""
@@ -301,6 +380,9 @@ def rewrite_query(state: ChatState):
     # Update the state with the new search query
     return {"search_query": result.query}
 
+
+
+
 # %%
 def web_search(state: ChatState):
     """Fallback tool using the optimized search query."""
@@ -318,8 +400,11 @@ def web_search(state: ChatState):
     logger.info("--- WEB SEARCH COMPLETED ---")
     return {"documents": [new_doc]}
 
+
+
+
 # %%
-from langchain_core.prompts import MessagesPlaceholder
+
 
 def generate(state: ChatState):
     """Generates the final answer."""
@@ -382,7 +467,7 @@ def generate_direct(state: ChatState):
 
     out = get_llm().invoke(prompt.format_messages(question=state["query"], chat_history=messages))
     logger.info("--- DIRECT GENERATION COMPLETED ---")
-    return {"answer": out.content}
+    return {"answer": out.content, "messages": [out]}
 
 
 # %%
@@ -439,33 +524,103 @@ def get_uploaded_videos_from_chroma() -> list[str]:
 
 # %%
 
+def summarize_conversation(state: ChatState):
+
+    existing_summary = state["summary"]
+    
+    if existing_summary:
+        prompt = (
+            f"Existing summary:\n{existing_summary}\n\n"
+            "Extend the summary using the new conversation above."
+        )
+    else:
+        prompt = "Summarize the conversation above."
+
+    messages_for_summary = state["messages"] + [
+        HumanMessage(content=prompt)
+    ]
+
+
+    response = get_llm().invoke(messages_for_summary)
+
+    # Keep only last 2 messages verbatim
+    messages_to_delete = state["messages"][:-2]
+
+    return {
+        "summary": response.content,
+        "messages": [RemoveMessage(id=m.id) for m in messages_to_delete],
+    }
+
+# %%
+
+def should_summarize(state: ChatState):
+    return len(state["messages"]) > 6
+
+
+# %%
+
 graph = StateGraph(ChatState)
 
 graph.add_node("upload", upload_document)
 graph.add_node("decide_retrieval", decide_retrieval)
 graph.add_node("retrive_document", retrive_document)
-graph.add_node("grade_documents", grade_documents)
+graph.add_node("grade_single_document", grade_single_document)
+graph.add_node("evaluate_grading_results", evaluate_grading_results)
+# graph.add_node("grade_documents", grade_documents)
 graph.add_node("rewrite_query", rewrite_query)
 graph.add_node("web_search", web_search)
 graph.add_node("generate", generate)
 graph.add_node("generate_direct", generate_direct)
+graph.add_node("summarize_conversation", summarize_conversation)
+
 
 graph.add_conditional_edges(START, route)
 graph.add_edge("upload", END)
 
 
 graph.add_conditional_edges("decide_retrieval", route_for_retrive)
-graph.add_edge("generate_direct", END)
-graph.add_edge("retrive_document", "grade_documents")
-graph.add_conditional_edges("grade_documents", route_after_grade, {
+# graph.add_edge("generate_direct", END)
+graph.add_conditional_edges(
+    "generate_direct",
+    should_summarize,
+    {
+        True: "summarize_conversation",
+        False: "__end__",
+    }
+)
+
+
+# graph.add_conditional_edges("retrive_document", map_grading)
+graph.add_conditional_edges(
+    "retrive_document", 
+    map_grading, 
+    ["grade_single_document"] # <-- This explicitly tells the compiler where the Send object goes
+)
+# graph.add_edge("retrive_document", "grade_documents")
+graph.add_edge("grade_single_document", "evaluate_grading_results")
+graph.add_conditional_edges("evaluate_grading_results", route_after_grade, {
         "rewrite_query": "rewrite_query",
         "generate": "generate"
-    })
+})
+
+
+
 
 graph.add_edge("rewrite_query", "web_search")
 graph.add_edge("web_search", "generate")
 
-graph.add_edge("generate", END)
+graph.add_conditional_edges(
+    "generate",
+    should_summarize,
+    {
+        True: "summarize_conversation",
+        False: "__end__",
+    }
+)
+
+# graph.add_edge("generate", END)
+graph.add_edge("summarize_conversation", END)
+
 
 workflow = graph.compile(checkpointer=checkpointer)
 
