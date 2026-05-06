@@ -95,6 +95,7 @@ class ChatState(TypedDict):
     answer: str
     messages: Annotated[list[BaseMessage], add_messages]
     filtered_documents: Annotated[List[Document], merge_docs]
+    summary: str
 
 
 class GradeWorkerState(TypedDict):
@@ -203,7 +204,7 @@ def upload_document(state: ChatState):
 # %%
 
 def decide_retrieval(state: ChatState):
-    logger.info("--- DECIDING RETRIEVAL ---")
+    logger.info("--- 1. DECIDING RETRIEVAL ---")
     class RetrieveDecision(BaseModel):
         need_retrieval: bool  = Field(description="true if external documents are needed to answer reliably, else false.")
 
@@ -227,6 +228,7 @@ def decide_retrieval(state: ChatState):
     decision: RetrieveDecision = llm.invoke(decide_retrieval_prompt.format_messages(question=state["query"]))
 
     logger.info(f"   -> Retrieval needed: {decision.need_retrieval}")
+    logger.info("--- RETRIEVAL DECISION COMPLETED ---")
     return {"need_retrieval": decision.need_retrieval}
 
 
@@ -234,16 +236,17 @@ def decide_retrieval(state: ChatState):
 
 
 # %%
-def retrive_document(state: ChatState):
-    logger.info("--- 2. RETRIVING THE DOCUMENTS FROM VECTOR DB ---")
+def retrieve_document(state: ChatState):
+    logger.info("--- 2. RETRIEVING THE DOCUMENTS FROM VECTOR DB ---")
     vector_db = Chroma(
         embedding_function = get_embeddings(),
         persist_directory = get_db_name()
     )
-    retirver = vector_db.as_retriever()
-    logger.info(f"   -> retriving the documents with query : {state['query']}")
-    documents = retirver.invoke(state['query'])
-    logger.info("--- RETRIVAL COMPLETED ---")
+    retriever = vector_db.as_retriever()
+    logger.info(f"   -> Retrieving the documents with query : {state['query']}")
+    documents = retriever.invoke(state['query'])
+    logger.info(f"   -> Retrieved {len(documents)} documents")
+    logger.info("--- RETRIEVAL COMPLETED ---")
     return {"documents": documents, "filtered_documents": "CLEAR"}
 
 # %%
@@ -252,32 +255,45 @@ from langgraph.types import Send
 def map_grading(state: ChatState):
     logger.info(f"--- DISPATCHING {len(state['documents'])} PARALLEL GRADERS ---")
 
-    return [
+    results = [
         Send("grade_single_document", {"query": state["query"], "document": doc}) for doc in state["documents"]
     ]
+    logger.info("--- DISPATCHING COMPLETED ---")
+    return results
 
 # %%
 def grade_single_document(state : GradeWorkerState):
+    logger.info("--- GRADING SINGLE DOCUMENT ---")
     class Grade(BaseModel):
         binary_score: Literal["yes","no"] = Field(description="Relevance score 'yes' or 'no'")
 
     llm = get_llm()
     structured_llm = llm.with_structured_output(Grade)
 
-    prompt = PromptTemplate(
-        template="""You are a grader assessing relevance of a retrieved document to a user question. 
-        If the document contains keyword(s) or semantic meaning related to the question, grade it as relevant.
-        Return 'yes' if relevant, or 'no' if irrelevant.
-        
-        Retrieved document: \n\n {document} \n\n
-        User question: {question}""",
-        input_variables=["document", "question"],
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", """You are a strict grader assessing the relevance of a retrieved document to a user question. 
+            If the document contains keyword(s) or semantic meaning related to the question, grade it as relevant.
+            You must output JSON. Set the 'binary_score' key to 'yes' if the document is relevant, or 'no' if it is irrelevant."""),
+            ("human", "Retrieved document: \n\n {document} \n\n User question: {question}")
+        ]
     )
+
+    # prompt = PromptTemplate(
+    #     template="""You are a grader assessing relevance of a retrieved document to a user question. 
+    #     If the document contains keyword(s) or semantic meaning related to the question, grade it as relevant.
+    #     Return 'yes' if relevant, or 'no' if irrelevant.
+        
+    #     Retrieved document: \n\n {document} \n\n
+    #     User question: {question}""",
+    #     input_variables=["document", "question"],
+    # )
 
     chain = prompt | structured_llm
 
     score = chain.invoke({"question": state['query'], "document": state["document"].page_content})
-
+    
+    logger.info(f"   -> Document relevance: {score.binary_score}")
 
     if score.binary_score == "yes":
         # It's relevant! Toss it into the shared bucket.
@@ -297,9 +313,11 @@ def evaluate_grading_results(state: ChatState):
     if len(good_docs) > 0:
         logger.info(f"   -> {len(good_docs)} documents passed.")
         # Overwrite the main documents list with ONLY the good ones
+        logger.info("--- GRADING EVALUATION COMPLETED (RELEVANT) ---")
         return {"documents": good_docs, "web_search_needed": False}
     else:
         logger.info("   -> 0 documents passed. Fallback required.")
+        logger.info("--- GRADING EVALUATION COMPLETED (IRRELEVANT) ---")
         return {"web_search_needed": True}
         
 
@@ -443,7 +461,7 @@ def generate(state: ChatState):
 
 
 def generate_direct(state: ChatState):
-    logger.info("--- GENERATING DIRECT ANSWER ---")
+    logger.info("--- 2. GENERATING DIRECT ANSWER ---")
     messages = state.get("messages", [])
     
     prompt = ChatPromptTemplate.from_messages([
@@ -466,6 +484,7 @@ def generate_direct(state: ChatState):
     # )
 
     out = get_llm().invoke(prompt.format_messages(question=state["query"], chat_history=messages))
+    logger.info(f"   -> Direct response generated (length: {len(out.content)})")
     logger.info("--- DIRECT GENERATION COMPLETED ---")
     return {"answer": out.content, "messages": [out]}
 
@@ -489,9 +508,9 @@ def route(state: ChatState) -> Literal["upload", "decide_retrieval"]:
 # %%
 
 
-def route_for_retrive(state: ChatState) -> Literal["retrive_document", "generate_direct"]:
+def route_for_retrieve(state: ChatState) -> Literal["retrieve_document", "generate_direct"]:
     if state.get("need_retrieval"):
-        return "retrive_document"
+        return "retrieve_document"
     
     return "generate_direct"
 # %%
@@ -525,15 +544,17 @@ def get_uploaded_videos_from_chroma() -> list[str]:
 # %%
 
 def summarize_conversation(state: ChatState):
-
-    existing_summary = state["summary"]
+    logger.info("--- SUMMARISING THE CONVERSATION ---")
+    existing_summary = state.get("summary","")
     
     if existing_summary:
+        logger.info("   -> Extending existing summary")
         prompt = (
             f"Existing summary:\n{existing_summary}\n\n"
             "Extend the summary using the new conversation above."
         )
     else:
+        logger.info("   -> Creating new summary")
         prompt = "Summarize the conversation above."
 
     messages_for_summary = state["messages"] + [
@@ -545,7 +566,10 @@ def summarize_conversation(state: ChatState):
 
     # Keep only last 2 messages verbatim
     messages_to_delete = state["messages"][:-2]
+    logger.info(f"   -> Summary generated (length: {len(response.content)}), deleting {len(messages_to_delete)} old messages")
+    
 
+    logger.info("--- CONVERSATION SUMMARISATION COMPLETED ---")
     return {
         "summary": response.content,
         "messages": [RemoveMessage(id=m.id) for m in messages_to_delete],
@@ -554,6 +578,7 @@ def summarize_conversation(state: ChatState):
 # %%
 
 def should_summarize(state: ChatState):
+    logger.info(f"   -> Length of the messages {len(state["messages"])}")
     return len(state["messages"]) > 6
 
 
@@ -563,7 +588,7 @@ graph = StateGraph(ChatState)
 
 graph.add_node("upload", upload_document)
 graph.add_node("decide_retrieval", decide_retrieval)
-graph.add_node("retrive_document", retrive_document)
+graph.add_node("retrieve_document", retrieve_document)
 graph.add_node("grade_single_document", grade_single_document)
 graph.add_node("evaluate_grading_results", evaluate_grading_results)
 # graph.add_node("grade_documents", grade_documents)
@@ -578,7 +603,7 @@ graph.add_conditional_edges(START, route)
 graph.add_edge("upload", END)
 
 
-graph.add_conditional_edges("decide_retrieval", route_for_retrive)
+graph.add_conditional_edges("decide_retrieval", route_for_retrieve)
 # graph.add_edge("generate_direct", END)
 graph.add_conditional_edges(
     "generate_direct",
@@ -590,13 +615,13 @@ graph.add_conditional_edges(
 )
 
 
-# graph.add_conditional_edges("retrive_document", map_grading)
+# graph.add_conditional_edges("retrieve_document", map_grading)
 graph.add_conditional_edges(
-    "retrive_document", 
+    "retrieve_document", 
     map_grading, 
     ["grade_single_document"] # <-- This explicitly tells the compiler where the Send object goes
 )
-# graph.add_edge("retrive_document", "grade_documents")
+# graph.add_edge("retrieve_document", "grade_documents")
 graph.add_edge("grade_single_document", "evaluate_grading_results")
 graph.add_conditional_edges("evaluate_grading_results", route_after_grade, {
         "rewrite_query": "rewrite_query",
