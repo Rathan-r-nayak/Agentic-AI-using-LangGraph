@@ -150,23 +150,25 @@ def get_video_id_match(url):
 
 # %%
 def upload_document(state: ChatState):
-    logger.info("--- 1. UPLOADING THE DOCUMENTS ---")
+    logger.info("--- NODE: UPLOADING THE DOCUMENTS ---")
     url = state["url"]
     match = get_video_id_match(url)
     if not match:
+        logger.error(f"   -> Invalid YouTube URL: {url}")
         raise ValueError("Could not find a valid YouTube Video ID in the provided URL.")
     video_id = match.group(1)
-    logger.info(f"   -> getting the transcript for video with id : {video_id}")
+    logger.info(f"   -> Extracting transcript for Video ID: {video_id}")
 
     transcript = fetch_youtube_transcript(url)
     title = fetch_youtube_title(url)
 
-    logger.info(f"   -> fetching of the data completed video_id : {video_id}, title: {title}")
     if transcript:
+        logger.info(f"   -> Metadata fetched: Title='{title}', VideoID='{video_id}'")
         doc = Document(page_content=transcript, metadata={"source": url})
         
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         chunks = splitter.split_documents([doc])
+        logger.info(f"   -> Split transcript into {len(chunks)} chunks.")
 
         ids = []
         for index, chunk in enumerate(chunks):
@@ -175,7 +177,6 @@ def upload_document(state: ChatState):
             chunk_id = hashlib.md5(unique_string.encode()).hexdigest()
             ids.append(chunk_id)
             
-            # (Optional) Save the chunk number in metadata so the AI knows order
             chunk.metadata["chunk_number"] = index
             chunk.metadata["video_id"] = video_id
             chunk.metadata["title"] = title
@@ -186,20 +187,19 @@ def upload_document(state: ChatState):
             ids=ids,
             persist_directory=get_db_name()
         )
-        logger.info("--- DOCUMENT UPLOADING COMPLETED ---")
-        return {"title": title, "video_id": video_id} # Update the state
+        logger.info("--- DOCUMENT UPLOADING COMPLETED SUCCESSFULLY ---")
+        return {"title": title, "video_id": video_id} 
     else:
-        logger.warning(f"Warning: No transcript found for {url}")
+        logger.warning(f"   -> No transcript found for {url}")
         logger.info("--- DOCUMENT UPLOADING FAILED ---")
         return {"title": title, "video_id": video_id}
-
-
-
 
 # %%
 
 def decide_retrieval(state: ChatState):
-    logger.info("--- 1. DECIDING RETRIEVAL ---")
+    logger.info("--- NODE: DECIDING RETRIEVAL ---")
+    logger.info(f"   -> User Query: '{state['query']}'")
+    
     class RetrieveDecision(BaseModel):
         need_retrieval: bool  = Field(description="true if external documents are needed to answer reliably, else false.")
 
@@ -222,7 +222,7 @@ def decide_retrieval(state: ChatState):
     llm = get_llm().with_structured_output(RetrieveDecision)
     decision: RetrieveDecision = llm.invoke(decide_retrieval_prompt.format_messages(question=state["query"]))
 
-    logger.info(f"   -> Retrieval needed: {decision.need_retrieval}")
+    logger.info(f"   -> Decision: Retrieval needed = {decision.need_retrieval}")
     logger.info("--- RETRIEVAL DECISION COMPLETED ---")
     return {"need_retrieval": decision.need_retrieval}
 
@@ -232,15 +232,15 @@ def decide_retrieval(state: ChatState):
 
 # %%
 def retrieve_document(state: ChatState):
-    logger.info("--- 2. RETRIEVING THE DOCUMENTS FROM VECTOR DB ---")
+    logger.info("--- NODE: RETRIEVING THE DOCUMENTS ---")
     vector_db = Chroma(
         embedding_function = get_embeddings(),
         persist_directory = get_db_name()
     )
     retriever = vector_db.as_retriever()
-    logger.info(f"   -> Retrieving the documents with query : {state['query']}")
+    logger.info(f"   -> Query for Retrieval: '{state['query']}'")
     documents = retriever.invoke(state['query'])
-    logger.info(f"   -> Retrieved {len(documents)} documents")
+    logger.info(f"   -> Successfully retrieved {len(documents)} documents.")
     logger.info("--- RETRIEVAL COMPLETED ---")
     return {"documents": documents, "filtered_documents": "CLEAR"}
 
@@ -248,17 +248,18 @@ def retrieve_document(state: ChatState):
 
 from langgraph.types import Send
 def map_grading(state: ChatState):
-    logger.info(f"--- DISPATCHING {len(state['documents'])} PARALLEL GRADERS ---")
+    num_docs = len(state['documents'])
+    logger.info(f"--- NODE: DISPATCHING {num_docs} PARALLEL GRADERS ---")
 
     results = [
         Send("grade_single_document", {"query": state["query"], "document": doc}) for doc in state["documents"]
     ]
-    logger.info("--- DISPATCHING COMPLETED ---")
+    logger.info(f"   -> Dispatched {num_docs} documents for grading.")
     return results
 
 # %%
 def grade_single_document(state : GradeWorkerState):
-    logger.info("--- GRADING SINGLE DOCUMENT ---")
+    logger.info("--- NODE: GRADING SINGLE DOCUMENT ---")
     class Grade(BaseModel):
         binary_score: Literal["yes","no"] = Field(description="Relevance score 'yes' or 'no'")
 
@@ -274,44 +275,32 @@ def grade_single_document(state : GradeWorkerState):
         ]
     )
 
-    # prompt = PromptTemplate(
-    #     template="""You are a grader assessing relevance of a retrieved document to a user question. 
-    #     If the document contains keyword(s) or semantic meaning related to the question, grade it as relevant.
-    #     Return 'yes' if relevant, or 'no' if irrelevant.
-        
-    #     Retrieved document: \n\n {document} \n\n
-    #     User question: {question}""",
-    #     input_variables=["document", "question"],
-    # )
-
     chain = prompt | structured_llm
 
     score = chain.invoke({"question": state['query'], "document": state["document"].page_content})
     
-    logger.info(f"   -> Document relevance: {score.binary_score}")
+    logger.info(f"   -> Grade: {score.binary_score} (Doc Snippet: {state['document'].page_content[:50]}...)")
 
     if score.binary_score == "yes":
-        # It's relevant! Toss it into the shared bucket.
         return {"filtered_documents": [state["document"]]}
     else:
-        # Irrelevant. Return an empty list (adds nothing to the bucket).
         return {"filtered_documents": []}
 
 
 # %%
 
 def evaluate_grading_results(state: ChatState):
-    logger.info("--- 3. EVALUATING PARALLEL GRADING RESULTS ---")
+    logger.info("--- NODE: EVALUATING PARALLEL GRADING RESULTS ---")
 
     good_docs = state.get("filtered_documents", [])
+    num_good = len(good_docs)
 
-    if len(good_docs) > 0:
-        logger.info(f"   -> {len(good_docs)} documents passed.")
-        # Overwrite the main documents list with ONLY the good ones
+    if num_good > 0:
+        logger.info(f"   -> Result: {num_good} documents passed grading.")
         logger.info("--- GRADING EVALUATION COMPLETED (RELEVANT) ---")
         return {"documents": good_docs, "web_search_needed": False}
     else:
-        logger.info("   -> 0 documents passed. Fallback required.")
+        logger.warning("   -> Result: 0 documents passed grading. Web search fallback triggered.")
         logger.info("--- GRADING EVALUATION COMPLETED (IRRELEVANT) ---")
         return {"web_search_needed": True}
         
@@ -364,7 +353,7 @@ def grade_documents(state: ChatState):
 # %%
 def rewrite_query(state: ChatState):
     """Rewrites the user's original question into an optimized web search query."""
-    logger.info("--- 4. REWRITING QUERY FOR WEB SEARCH ---")
+    logger.info("--- NODE: REWRITING QUERY FOR WEB SEARCH ---")
     query = state["query"]
 
 
@@ -387,8 +376,8 @@ def rewrite_query(state: ChatState):
     rewrite_chain = prompt | structred_llm
     result = rewrite_chain.invoke({"query": query})
 
-    logger.info(f"   -> Original: {query}")
-    logger.info(f"   -> Rewritten: {result.query}")
+    logger.info(f"   -> Original Query: {query}")
+    logger.info(f"   -> Rewritten Query: {result.query}")
     logger.info("--- QUERY REWRITING COMPLETED ---")
     # Update the state with the new search query
     return {"search_query": result.query}
@@ -399,17 +388,16 @@ def rewrite_query(state: ChatState):
 # %%
 def web_search(state: ChatState):
     """Fallback tool using the optimized search query."""
-    logger.info("--- 5. PERFORMING WEB SEARCH ---")
+    logger.info("--- NODE: PERFORMING WEB SEARCH ---")
     search_tool = DuckDuckGoSearchRun()
-    # search_tool.invoke("apollo tyres share price")
 
     optimized_query = state['search_query']
 
-    logger.info(f"   -> Searching the web for: '{optimized_query}'")
+    logger.info(f"   -> Searching DuckDuckGo for: '{optimized_query}'")
     
     search_result = search_tool.invoke(optimized_query)
     new_doc = Document(page_content=search_result)
-    logger.info(f"   -> Web response length: {len(search_result)}")
+    logger.info(f"   -> Web search returned {len(search_result)} characters of context.")
     logger.info("--- WEB SEARCH COMPLETED ---")
     return {"documents": [new_doc]}
 
@@ -421,7 +409,7 @@ def web_search(state: ChatState):
 
 def generate(state: ChatState, config: RunnableConfig, store: BaseStore):
     """Generates the final answer."""
-    logger.info("--- 6. GENERATING FINAL ANSWER ---")
+    logger.info("--- NODE: GENERATING FINAL ANSWER (RAG) ---")
     documents = state['documents']
     docs_text = "\n\n".join([doc.page_content for doc in documents])
 
@@ -436,10 +424,14 @@ def generate(state: ChatState, config: RunnableConfig, store: BaseStore):
 
     if saved_memories:
         memory_text = "\n".join(f"- {data.value['data']}" for data in saved_memories)
+        logger.info(f"   -> Retrieved {len(saved_memories)} long-term memories for user '{user_id}'")
+        logger.info(f"   -> Memory Content:\n{memory_text}")
     else:
         memory_text = "No long-term facts known about this user yet."
+        logger.info(f"   -> No long-term memories found for user '{user_id}'")
 
-        
+    if summary:
+        logger.info(f"   -> Using existing conversation summary: '{summary[:100]}...'")
 
     system_instruction = (
         "You are an expert AI assistant tasked with answering questions strictly based on the provided context.\n\n"
@@ -479,7 +471,7 @@ def generate(state: ChatState, config: RunnableConfig, store: BaseStore):
         "chat_history": chat_history
     })
 
-    logger.info(f"   -> response generated (length: {len(response.content)})")
+    logger.info(f"   -> Response generated. Length: {len(response.content)} characters.")
     logger.info("--- GENERATION COMPLETED ---")
     return {"answer": response.content, "messages": [response]}
 
@@ -488,7 +480,7 @@ def generate(state: ChatState, config: RunnableConfig, store: BaseStore):
 
 
 def generate_direct(state: ChatState, config: RunnableConfig, store: BaseStore):
-    logger.info("--- 2. GENERATING DIRECT ANSWER ---")
+    logger.info("--- NODE: GENERATING DIRECT ANSWER (NO RAG) ---")
     messages = state.get("messages", [])
     summary = state.get("summary", "")
 
@@ -499,8 +491,11 @@ def generate_direct(state: ChatState, config: RunnableConfig, store: BaseStore):
 
     if saved_memories:
         memory_text = "\n".join(f"- {data.value['data']}" for data in saved_memories)
+        logger.info(f"   -> Retrieved {len(saved_memories)} long-term memories for user '{user_id}'")
+        logger.info(f"   -> Memory Content:\n{memory_text}")
     else:
         memory_text = "No long-term facts known about this user yet."
+        logger.info(f"   -> No long-term memories found for user '{user_id}'")
 
 
     system_instruction = (
@@ -511,6 +506,7 @@ def generate_direct(state: ChatState, config: RunnableConfig, store: BaseStore):
     )
     
     if summary:
+        logger.info(f"   -> Using existing conversation summary: '{summary[:100]}...'")
         system_instruction += (
             "### RECENT CONTEXT (Short-Term Memory)\n"
             f"{summary}\n\n"
@@ -540,7 +536,7 @@ def generate_direct(state: ChatState, config: RunnableConfig, store: BaseStore):
     })
 
 
-    logger.info(f"   -> Direct response generated (length: {len(out.content)})")
+    logger.info(f"   -> Direct response generated. Length: {len(out.content)} characters.")
     logger.info("--- DIRECT GENERATION COMPLETED ---")
     return {"answer": out.content, "messages": [out]}
 
@@ -600,17 +596,17 @@ def get_uploaded_videos_from_chroma() -> list[str]:
 # %%
 
 def summarize_conversation(state: ChatState):
-    logger.info("--- SUMMARISING THE CONVERSATION ---")
+    logger.info("--- NODE: SUMMARISING THE CONVERSATION ---")
     existing_summary = state.get("summary","")
     
     if existing_summary:
-        logger.info("   -> Extending existing summary")
+        logger.info(f"   -> Extending existing summary (Length: {len(existing_summary)})")
         prompt = (
             f"Existing summary:\n{existing_summary}\n\n"
             "Extend the summary using the new conversation above."
         )
     else:
-        logger.info("   -> Creating new summary")
+        logger.info("   -> Creating new summary from scratch.")
         prompt = "Summarize the conversation above."
 
     messages_for_summary = state["messages"] + [
@@ -622,7 +618,9 @@ def summarize_conversation(state: ChatState):
 
     # Keep only last 2 messages verbatim
     messages_to_delete = state["messages"][:-2]
-    logger.info(f"   -> Summary generated (length: {len(response.content)}), deleting {len(messages_to_delete)} old messages")
+    logger.info(f"   -> New Summary Length: {len(response.content)} characters.")
+    logger.info(f"   -> Summary Content: {response.content[:150]}...")
+    logger.info(f"   -> Deleting {len(messages_to_delete)} old messages from state.")
     
 
     logger.info("--- CONVERSATION SUMMARISATION COMPLETED ---")
@@ -634,8 +632,11 @@ def summarize_conversation(state: ChatState):
 # %%
 
 def should_summarize(state: ChatState):
-    logger.info(f"   -> Length of the messages {len(state["messages"])}")
-    return len(state["messages"]) > 6
+    msg_count = len(state["messages"])
+    logger.info(f"--- CHECK: SHOULD SUMMARIZE? (Message count: {msg_count}) ---")
+    result = msg_count > 6
+    logger.info(f"   -> Result: {result}")
+    return result
 
 
 # %%
@@ -656,7 +657,7 @@ TASK:
 """
 
 def remember_node(state: ChatState, config: RunnableConfig, store: BaseStore):
-    logger.info("--- EXTRACTING LONG TERM MEMORY ---")
+    logger.info("--- NODE: EXTRACTING LONG TERM MEMORY ---")
 
     class MemoryDecision(BaseModel):
         should_write: bool = Field(description="whether to store the data in long term memory")
@@ -667,12 +668,16 @@ def remember_node(state: ChatState, config: RunnableConfig, store: BaseStore):
     namespace = ("user", user_id, "details")
 
     message = state['messages'][-1].content
+    logger.info(f"   -> Analyzing last message from user '{user_id}': '{message}'")
+    
     user_memory = store.search(namespace)
 
     if user_memory:
         user_memory_text = "\n".join(data.value["data"] for data in user_memory)
+        logger.info(f"   -> Existing memories found for user '{user_id}':\n{user_memory_text}")
     else:
         user_memory_text = "No previous memory."
+        logger.info(f"   -> No existing memories found for user '{user_id}'.")
 
 
     structured_llm = get_llm().with_structured_output(MemoryDecision)
@@ -684,12 +689,16 @@ def remember_node(state: ChatState, config: RunnableConfig, store: BaseStore):
     )
 
 
-    if decision.should_write:
+    if decision.should_write and decision.memories:
+        logger.info(f"   -> AI decided to store {len(decision.memories)} NEW memories.")
         for memory in decision.memories:
             logger.info(f"   -> SAVING FACT TO DB: {memory}")
             # We use a UUID so each fact gets its own unique file in the folder
             store.put(namespace=namespace, key=str(uuid.uuid4()), value={"data": memory})
+    else:
+        logger.info("   -> No new memory-worthy information extracted.")
 
+    logger.info("--- MEMORY EXTRACTION COMPLETED ---")
     return {}
 # %%
 
@@ -774,7 +783,7 @@ checkpointer.setup()
 store = PostgresStore(pool)
 store.setup()
 
-workflow = graph.compile(checkpointer=checkpointer, store=store)
+workflow = graph.compile(checkpointer=checkpointer, store=store, interrupt_before=["web_search"])
 
 
 

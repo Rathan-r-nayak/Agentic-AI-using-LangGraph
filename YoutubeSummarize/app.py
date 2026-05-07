@@ -22,6 +22,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+thread_id = "fix_test_1"
+CHAT_CONFIG = {"configurable": {"thread_id": thread_id, "user_id": "rathan_001"}}
+
+
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Custom NotebookLM", page_icon="📚", layout="wide")
 st.title("📚 Custom NotebookLM")
@@ -30,7 +34,7 @@ st.title("📚 Custom NotebookLM")
 # This keeps track of our chat history and uploaded videos so they don't disappear
 if "messages" not in st.session_state:
     with st.spinner("Loading previous chats..."):
-        st.session_state.messages = load_chat_history("my_first_conversation")
+        st.session_state.messages = load_chat_history(thread_id)
     
 if "uploaded_videos" not in st.session_state:
     st.session_state.uploaded_videos = get_uploaded_videos_from_chroma()
@@ -47,14 +51,13 @@ with st.sidebar:
             logger.info(f"Processing video URL: {url_input}")
             with st.spinner("Extracting transcript & saving to ChromaDB..."):
                 try:
-                    config = {"configurable": {"thread_id": "my_first_conversation", "user_id": "rathan_001"}}
 
                     # Trigger the upload node in your LangGraph!
                     result = workflow.invoke({
                         "url": url_input, 
                         "is_upload": True, 
                         "query": ""
-                    }, config=config)
+                    }, config=CHAT_CONFIG)
                     
                     # Grab the title from your state return and save it to the UI
                     video_title = result.get("title", "Unknown Video")
@@ -84,50 +87,70 @@ with st.sidebar:
 # --- MAIN AREA: CHAT INTERFACE ---
 st.write("Ask questions about the videos in your knowledge base!")
 
+current_state = workflow.get_state(CHAT_CONFIG)
+is_paused = len(current_state.next) > 0
+
+
 # Draw all past messages to the screen
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# The Chat Input box at the bottom of the screen
-if prompt := st.chat_input("What is this video about?"):
 
-    # Immediately show the user's question in the UI
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
 
-    logger.info(f"User asked: {prompt}")
+if is_paused:
+    st.warning("⚠️ **Human-in-the-Loop:** The AI could not find the answer in your documents and wants to perform a live Web Search. Do you approve?")
 
-    # Show a loading spinner while LangGraph does its retrieval and grading
-    with st.chat_message("assistant"):
-        with st.spinner("Searching transcripts and evaluating context..."):
-            try:
-                config = {"configurable": {"thread_id": "my_first_conversation"}}
-                # Trigger the CRAG pipeline!
-                # Notice we pass is_upload: False, so it skips the upload node
-                user_msg = HumanMessage(content=prompt)
-                result = workflow.invoke({
-                    "url": "", 
-                    "is_upload": False, 
-                    "query": prompt,
-                    "messages": [user_msg]
-                }, config=config)
-
-                answer = result["answer"]
-
-                # Display the answer``
-                st.markdown(answer)
-
-                # If your graph decided to use DuckDuckGo, let the user know!
-                if result.get("web_search_needed"):
-                    st.caption("🔍 *This answer was supplemented with a live web search because the video didn't contain the answer.*")
-                    logger.info("Answer supplemented with web search.")
-
-                # Save the assistant's answer to the chat history
+    if st.button("✅ Approve Web Search", use_container_width=True):
+        with st.chat_message("assistant"):
+            with st.spinner("Searching the web and generating final answer..."):
+                # Resume the graph by passing None!
+                result = workflow.invoke(None, config=CHAT_CONFIG)
+                
+                answer = result.get("answer", "No answer generated.")
                 st.session_state.messages.append({"role": "assistant", "content": answer})
-                logger.info("Assistant response generated successfully.")
+                st.rerun() # Refresh page to clear the button and restore chat
+    
+    # CRITICAL: We stop Streamlit here so it doesn't draw the chat input box!
+    st.stop()
+else :
+    if prompt := st.chat_input("What is this video about?"):
+        # Immediately show the user's question in the UI
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-            except Exception as e:
-                st.error(f"An error occurred during generation: {e}")
-                logger.error(f"Error during generation: {e}", exc_info=True)
+        logger.info(f"User asked: {prompt}")
+
+        # Show a loading spinner while LangGraph does its retrieval and grading
+        with st.chat_message("assistant"):
+            with st.spinner("Searching transcripts and evaluating context..."):
+                try:
+                    # Trigger the CRAG pipeline!
+                    # Notice we pass is_upload: False, so it skips the upload node
+                    user_msg = HumanMessage(content=prompt)
+                    result = workflow.invoke({
+                        "url": "", 
+                        "is_upload": False, 
+                        "query": prompt,
+                        "messages": [user_msg]
+                    }, config=CHAT_CONFIG)
+
+                    after_run_snapshot = workflow.get_state(CHAT_CONFIG)
+                
+                    if len(after_run_snapshot.next) > 0:
+                        # It paused! Rerun the whole page immediately to show the Approve button
+                        st.rerun() 
+                    else:
+                        # It finished normally without needing approval
+                        answer = result.get("answer", "No answer generated.")
+                        st.markdown(answer)
+                        
+                        if result.get("web_search_needed"):
+                            st.caption("🔍 *This answer was supplemented with a live web search.*")
+                            
+                        st.session_state.messages.append({"role": "assistant", "content": answer})
+
+                except Exception as e:
+                    st.error(f"An error occurred during generation: {e}")
+                    logger.error(f"Error during generation: {e}", exc_info=True)
