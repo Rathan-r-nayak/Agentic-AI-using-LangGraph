@@ -15,12 +15,18 @@ import streamlit as st
 
 from psycopg_pool import ConnectionPool
 from langgraph.checkpoint.postgres import PostgresSaver
-from backend import workflow
+from backend import workflow, setup_logging
 
-# -----------------------------
-# Import your compiled LangGraph app
-# -----------------------------
-# from backend import app_graph as app
+# Ensure logging is configured correctly
+import warnings
+import logging
+
+# Filter out specific FutureWarning/UserWarning messages
+warnings.filterwarnings("ignore", message=".*Accessing `__path__`.*")
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+# Optionally, lower the transformers logging level
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 
 @st.cache_resource

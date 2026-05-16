@@ -19,11 +19,26 @@ from langgraph.checkpoint.memory import MemorySaver
 import logging
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+def setup_logging():
+    # Silencing noisy loggers from libraries
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("psycopg").setLevel(logging.WARNING)
+    logging.getLogger("langchain").setLevel(logging.WARNING)
+    logging.getLogger("langgraph").setLevel(logging.WARNING)
+    logging.getLogger("google.ai.generativelanguage").setLevel(logging.WARNING)
+    logging.getLogger("google.api_core").setLevel(logging.WARNING)
+    logging.getLogger("google.auth").setLevel(logging.WARNING)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
+        datefmt='%H:%M:%S',
+        force=True # Override any existing config
+    )
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -370,7 +385,7 @@ def should_fetch_images(state: State) -> str:
     return "verify" if len(specs) > 0 else "skip"
 
 def image_planner_node(state: State) -> dict:
-    print("[IMAGE_PLANNER] | Planning whether images are needed")
+    logger.info("[IMAGE_PLANNER] | Planning whether images are needed")
     planner = get_gemini_llm().with_structured_output(GlobalImagePlan)
     raw_plan = state.get("plan", {})
     blog_kind = raw_plan.get("blog_kind", "explainer") if isinstance(raw_plan, dict) else getattr(raw_plan, "blog_kind", "explainer")
