@@ -20,19 +20,15 @@ from Nodes.WorkerNode import worker_node
 from Nodes.MergeNode import merge_node
 from Nodes.CritiqueNode import critique_node
 from Nodes.RememberNode import remember_node
-# Ensure you import your router if you want to use the JSON-based routing
-# from Nodes.IntentRouterNode import intent_router_node 
-
-# ==========================================
-# ROUTING LOGIC FUNCTIONS
-# ==========================================
-
-
-
-
-
-
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.store.postgres import PostgresStore
+from psycopg_pool import ConnectionPool
 from Utils.Logger import get_logger
+import os
+
+DB_URI = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/smart_triage_db")
+
+
 
 logger = get_logger("MAIN")
 
@@ -110,11 +106,32 @@ workflow.add_edge("remember_node", END)
 # COMPILE WITH CHECKPOINTER
 # ==========================================
 
+
+
+pool = ConnectionPool(
+    conninfo=DB_URI,
+    max_size=20,
+    kwargs={"autocommit": True} # Required for LangGraph savers
+)
+
+# Setup Checkpointer (Short-term thread snapshots)
+checkpointer = PostgresSaver(pool)
+checkpointer.setup() 
+
+# Setup Store (Long-term cross-thread global memory)
+store = PostgresStore(pool)
+store.setup()
+
+
+
+
+
 # Using MemorySaver for current session history
-memory = MemorySaver()
+# memory = MemorySaver()
 
 app = workflow.compile(
-    checkpointer=memory,
+    checkpointer=checkpointer, 
+    store=store,
     interrupt_before=["web_search_node"]
 )
 

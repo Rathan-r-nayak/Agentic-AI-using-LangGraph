@@ -6,13 +6,17 @@ from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Import backend components
+from HelpDesk.Utils.HistoryLoaders import load_chat_history
 from Utils.DocumentProcessor import process_and_index_files
 from main import app as langgraph_app
 from Utils.VectorStore import add_documents_to_store, get_indexed_files
 from Utils.Helpers import analyze_image_context
 
 # Page Configuration
-st.set_page_config(page_title="Relay AI - IT Support", layout="wide", page_icon="🤖")
+# from Utils.HistoryLoader import load_chat_history
+
+# Page Configuration
+st.set_page_config(page_title="Smart AI Triage - IT Support 🎧", layout="wide", page_icon="🤖")
 
 # ==========================================
 # 1. SESSION STATE & CONFIG
@@ -23,14 +27,10 @@ if "thread_id" not in st.session_state:
 # Sync with LangGraph Checkpointer
 config = {"configurable": {"thread_id": st.session_state.thread_id}}
 
+# Load historical messages exclusively on first boot or thread reset
 if "messages" not in st.session_state:
-    st.session_state.messages = []
-    # Fetch existing state from checkpointer on first load
-    current_state = langgraph_app.get_state(config)
-    if current_state and current_state.values.get("messages"):
-        for msg in current_state.values["messages"]:
-            role = "user" if msg.type == "human" else "assistant"
-            st.session_state.messages.append({"role": role, "content": msg.content})
+    # Use your new utility function to pull from the Postgres Checkpointer
+    st.session_state.messages = load_chat_history(langgraph_app, st.session_state.thread_id)
 
 # ==========================================
 # 2. SIDEBAR - ROLE SELECTION

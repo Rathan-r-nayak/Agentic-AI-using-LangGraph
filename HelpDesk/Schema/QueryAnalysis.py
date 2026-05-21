@@ -24,9 +24,6 @@ class QueryAnalysis(BaseModel):
         default=None,
         description="The specific application experiencing the issue, or null (None) if unknown."
     )
-    application_name: str = Field(
-        description="The specific application experiencing the issue, or 'None' if unknown."
-    )
     optimized_search_query: str = Field(
         description="A rewritten search string focusing purely on error codes and technical indicators."
     )

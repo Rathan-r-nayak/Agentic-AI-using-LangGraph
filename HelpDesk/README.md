@@ -38,3 +38,61 @@ When an issue is complex, the Orchestrator breaks the resolution into sub-tasks 
 - **LLMs:** Azure OpenAI (GPT-4o / GPT-4o-mini)
 - **Vector DB:** ChromaDB / Azure AI Search
 - **Database:** SQLite3
+
+
+```mermaid
+graph TD
+    %% Define Node Colors and Shapes
+    START((START))
+    END(((END)))
+    
+    %% Graph Nodes
+    gatekeeper_node[Gatekeeper Node]
+    query_analyzer_node[Query Analyzer Node]
+    retrieve_node[Retrieve Node]
+    evaluator_node[Evaluator Node]
+    web_search_node[Web Search Node <br>⚠️ Interrupt Before]
+    orchestrator_node[Orchestrator Node]
+    worker_node[Worker Node <br><i>Parallel Map</i>]
+    merge_node[Merge Node <br><i>Reduce</i>]
+    critique_node[Critique Node]
+    remember_node[Remember Node]
+
+    %% Styles and Highlights
+    classDef core fill:#2374f7,stroke:#1155cc,color:#fff,font-weight:bold;
+    classDef conditional fill:#f1c232,stroke:#bf9000,color:#000;
+    classDef worker fill:#8e7cc3,stroke:#674ea7,color:#fff;
+    classDef terminal fill:#cc0000,stroke:#990000,color:#fff,font-weight:bold;
+    
+    class gatekeeper_node,query_analyzer_node,retrieve_node,orchestrator_node,merge_node,critique_node,remember_node core;
+    class evaluator_node conditional;
+    class worker_node worker;
+    class START,END terminal;
+
+    %% Workflow Connections
+    START --> gatekeeper_node
+
+    %% 2. Greeting Evaluation Split
+    gatekeeper_node -->|route_after_greeting| query_analyzer_node
+    gatekeeper_node -->|route_after_greeting| remember_node
+
+    %% 3. Knowledge Retrieval Pipeline
+    query_analyzer_node --> retrieve_node
+    retrieve_node --> evaluator_node
+
+    %% 4. Evaluation Routing Split
+    evaluator_node -->|route_after_evaluation| orchestrator_node
+    evaluator_node -->|route_after_evaluation| web_search_node
+    
+    %% Web Search fallback loops back
+    web_search_node --> orchestrator_node
+
+    %% 5. Multi-Agent Processing Framework (Map-Reduce)
+    orchestrator_node -.->|distribute_tasks| worker_node
+    worker_node --> merge_node
+
+    %% 6. Post-Process Sanitization and Memory Store Updates
+    merge_node --> critique_node
+    critique_node --> remember_node
+    remember_node --> END
+```
