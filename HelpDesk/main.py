@@ -5,12 +5,12 @@ from langgraph.constants import Send
 from langgraph.checkpoint.memory import MemorySaver
 
 # 1. Import State & Utilities
-from HelpDesk.Routers.Routers import distribute_tasks, route_after_evaluation, route_after_greeting
+from Routers.Routers import distribute_tasks, route_after_evaluation, route_after_greeting
 from State.HelpDeskState import HelpDeskState
 from Utils.Helpers import format_chat_history
 
 # 2. Import All Nodes
-from HelpDesk.Nodes.GateKeeperNode import gatekeeper_node
+from Nodes.GateKeeperNode import gatekeeper_node
 from Nodes.QueryAnalyzerNode import query_analyzer_node
 from Nodes.RetrieveNode import retrieve_node
 from Nodes.EvaluatorNode import evaluator_node
@@ -108,31 +108,29 @@ workflow.add_edge("remember_node", END)
 
 
 
-pool = ConnectionPool(
-    conninfo=DB_URI,
-    max_size=20,
-    kwargs={"autocommit": True} # Required for LangGraph savers
-)
+def get_compiled_app():
+    logger.info("Initializing Postgres connection pool and compiling graph...")
+    
+    pool = ConnectionPool(
+        conninfo=DB_URI,
+        max_size=20,
+        kwargs={"autocommit": True} 
+    )
 
-# Setup Checkpointer (Short-term thread snapshots)
-checkpointer = PostgresSaver(pool)
-checkpointer.setup() 
+    # Setup Checkpointer (STM)
+    checkpointer = PostgresSaver(pool)
+    checkpointer.setup() 
 
-# Setup Store (Long-term cross-thread global memory)
-store = PostgresStore(pool)
-store.setup()
+    # Setup Store (LTM)
+    store = PostgresStore(pool)
+    store.setup()
 
-
-
-
-
-# Using MemorySaver for current session history
-# memory = MemorySaver()
-
-app = workflow.compile(
-    checkpointer=checkpointer, 
-    store=store,
-    interrupt_before=["web_search_node"]
-)
-
-logger.info("Graph compiled successfully")
+    # Compile and return the app
+    app = workflow.compile(
+        checkpointer=checkpointer, 
+        store=store,
+        interrupt_before=["web_search_node"]
+    )
+    
+    logger.info("Graph compiled successfully")
+    return app

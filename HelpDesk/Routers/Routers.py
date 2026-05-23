@@ -1,5 +1,5 @@
 from Utils.Helpers import format_chat_history
-from HelpDesk.State import HelpDeskState
+from State import HelpDeskState
 from langgraph.constants import Send
 
 

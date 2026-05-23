@@ -1,52 +1,87 @@
-from Config.LLMConfig import fast_llm
-from Schema.QueryAnalysis import QueryAnalysis
-from State.HelpDeskState import HelpDeskState
+from typing import Dict, Any
 from langchain_core.prompts import ChatPromptTemplate
+from Config.LLMConfig import fast_llm
+from Schema.QueryAnalysis import generate_dynamic_query_schema
+from State.HelpDeskState import HelpDeskState
 from Utils.Logger import get_logger
 
 logger = get_logger("QUERY_ANALYZER")
 
-def query_analyzer_node(state: HelpDeskState):
+def query_analyzer_node(state: HelpDeskState) -> Dict[str, Any]:
     """
     Optimizes the raw user question for Vector DB retrieval.
-    Extracts application targets and assigns technical categories only under 100% certainty.
+    Dynamically fetches valid categories from the live catalog and extracts application targets.
     """
-    logger.info("Analyzing & rewriting query")
+    logger.info("--- 🔍 RUNNING QUERY ANALYZER ---")
     
-    # Bind our updated optional-field Pydantic schema to the fast LLM
-    structured_llm = fast_llm.with_structured_output(QueryAnalysis)
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are an IT Helpdesk Query Optimizer tasked with preparing data for Vector Database lookups.
-        
-        CRITICAL CORE RULES:
-        1. Rewrite the query to focus purely on technical keywords, error codes, and system symptoms.
-        2. Identify the target application if mentioned.
-        3. STRICT CATEGORIZATION RULE: Assign a 'category' (e.g., Database, Network, Software) ONLY if you are 100% certain. If there is any ambiguity, lack of details, or general phrasing, you MUST set 'category' to null.
-        
-        Do not assess urgency or user mood. Maintain strict focus on the technical infrastructure."""),
-        ("human", "{question}")
-    ])
-    
-    chain = prompt | structured_llm
-    
-    try:
-        analysis: QueryAnalysis = chain.invoke({"question": state["question"]})
-        
-        # Fall back to the original question if rewriting fails or returns empty
-        optimisd_search_query = analysis.optimized_search_query if analysis.optimized_search_query else state["question"]
-        
-        logger.info(f"Assigned Category: {analysis.category}")
-        logger.info(f"Optimized Query: {optimisd_search_query}")
-        
+    # 1. Early Exit Guard: Prevent API calls if the query is mysteriously empty
+    user_query = state.get("question", "").strip()
+    if not user_query:
+        logger.warning("Empty question received. Bypassing LLM analysis.")
         return {
-            "category": analysis.category,  # This will seamlessly pass str or None to the state
-            "search_query": optimisd_search_query
+            "category": "None",
+            "application_name": "None",
+            "search_query": ""
         }
+
+    logger.info(f"Original Query: '{user_query}'")
+
+    try:
+        # 2. Generate schema and bind LLM
+        LiveQuerySchema = generate_dynamic_query_schema()
+        structured_llm = fast_llm.with_structured_output(LiveQuerySchema)
+
+        system_prompt = (
+            "You are an expert IT triage routing assistant. Analyze the user's issue, "
+            "and select the single most accurate infrastructure assignment scope option. "
+            "Strip away all conversational filler to create a highly optimized vector search query."
+        )
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            ("human", "{question}")
+        ])
+        
+        chain = prompt | structured_llm
+        
+        # 3. Invoke the model
+        analysis = chain.invoke({"question": user_query})
+        
+        # Initialize defaults
+        category = "None"
+        application_name = "None"
+        
+        # 4. Safely unpack the string. Added .lower() check and .strip() for safety.
+        assigned_scope = getattr(analysis, 'assigned_scope', "None")
+        
+        if assigned_scope and assigned_scope.lower() != "none":
+            parts = assigned_scope.split(" - ", 1)
+            if len(parts) == 2:
+                category = parts[0].strip()
+                application_name = parts[1].strip()
+        
+        # 5. Extract query with safe fallback
+        optimized_search_query = getattr(analysis, 'optimized_search_query', "")
+        if not optimized_search_query:
+            optimized_search_query = user_query
+            
+        logger.info(f"Classified Target -> Category: '{category}' | App Scope: '{application_name}'")
+        logger.info(f"Optimized Search Query -> '{optimized_search_query}'")
+        
+        # 6. Return strictly typed dictionary
+        return {
+            "category": category,
+            "application_name": application_name,
+            "search_query": optimized_search_query
+        }
+        
     except Exception as e:
-        logger.error(f"Error in Query Analyzer extraction loop: {e}")
+        logger.error(f"Error during query analysis/extraction: {e}")
+        logger.warning("Failsafe triggered: Using raw query for vector search.")
+        
         # Fallback state mutation to keep the graph moving
         return {
-            "category": None,
-            "search_query": state["question"]
+            "category": "None",
+            "application_name": "None",
+            "search_query": user_query
         }

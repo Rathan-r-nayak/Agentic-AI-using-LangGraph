@@ -1,12 +1,13 @@
 from Config.LLMConfig import primary_llm
 from langchain_core.prompts import ChatPromptTemplate
+from Utils.Helpers import fetch_user_ltm
 from Utils.Logger import get_logger
+from langchain_core.runnables.config import RunnableConfig
+from langgraph.store.base import BaseStore
 
 logger = get_logger("WORKER")
 
-# Note: Import your specific State class here (WorkerState, HelpDeskState, etc.)
-
-def worker_node(state):
+def worker_node(state, config: RunnableConfig, store: BaseStore):
     # ==========================================
     # 1. EXTRACT TASK SAFELY (Handles Strings, Dicts, or Objects)
     # ==========================================
@@ -42,42 +43,12 @@ def worker_node(state):
     ])
 
     raw_question = state.get("question", "")
-    raw_ltm = state.get("long_term_facts", "")
+    # raw_ltm = state.get("long_term_facts", "")
+    raw_ltm = fetch_user_ltm(config, store)
     raw_stm = state.get("chat_history", state.get("messages", ""))
 
     # ==========================================
-    # 🚨 3. THE MASTER SANITIZER 🚨
-    # ==========================================
-    def sanitize(text):
-        if not isinstance(text, str):
-            text = str(text)
-        
-        replacements = {
-            "symptoms": "indicators", "Symptoms": "Indicators", "SYMPTOMS": "INDICATORS",
-            "symptom": "indicator", "Symptom": "Indicator", "SYMPTOM": "INDICATOR",
-            "diagnosis": "root cause analysis", "Diagnosis": "Root Cause Analysis", "DIAGNOSIS": "ROOT CAUSE ANALYSIS",
-            "diagnose": "analyze", "Diagnose": "Analyze", "DIAGNOSE": "ANALYZE",
-            "diagnosing": "analyzing", "Diagnosing": "Analyzing", "DIAGNOSING": "ANALYZING",
-            "diagnosed": "analyzed", "Diagnosed": "Analyzed", "DIAGNOSED": "ANALYZED",
-            "treatment": "resolution", "Treatment": "Resolution", "TREATMENT": "RESOLUTION",
-            "patient": "system", "Patient": "System", "PATIENT": "SYSTEM",
-            "severity": "impact", "Severity": "Impact", "SEVERITY": "IMPACT",
-            "priority": "level", "Priority": "Level", "PRIORITY": "LEVEL",
-            "triage": "sort", "Triage": "Sort", "TRIAGE": "SORT"
-        }
-        for bad_word, good_word in replacements.items():
-            text = text.replace(bad_word, good_word)
-        return text
-
-    safe_doc_text = sanitize(raw_doc_text)
-    safe_question = sanitize(raw_question)
-    safe_ltm = sanitize(raw_ltm)
-    safe_stm = sanitize(raw_stm)
-    safe_objective = sanitize(objective)
-    safe_req_str = sanitize(req_str)
-
-    # ==========================================
-    # 4. PROMPT & EXECUTE WITH FALLBACK
+    # 3. PROMPT & EXECUTE WITH FALLBACK
     # ==========================================
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a highly specialized IT Support Worker.
@@ -102,17 +73,17 @@ def worker_node(state):
     
     try:
         response = chain.invoke({
-            "ltm_facts": safe_ltm,
-            "stm_history": safe_stm,
-            "objective": safe_objective,
-            "requirements": safe_req_str,
-            "question": safe_question,
-            "doc_text": safe_doc_text
+            "ltm_facts": raw_ltm,
+            "stm_history": raw_stm,
+            "objective": objective,
+            "requirements": req_str,
+            "question": raw_question,
+            "doc_text": raw_doc_text
         })
         content = response.content
         
     except Exception as e:
-        logger.error(f"Azure Filter Blocked ({task_title}): {e}")
-        content = "*(Content automatically redacted by Azure safety filters. Please verify system indicators manually based on standard IT protocols.)*"
+        logger.error(f"Worker execution failed ({task_title}): {e}")
+        content = "*(Content unavailable. Please verify system logs manually based on standard IT protocols.)*"
     
     return {"worker_results": [f"### {task_title}\n{content}"]}

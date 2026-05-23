@@ -2,47 +2,26 @@ from Config.LLMConfig import primary_llm
 from Schema.ResolutionPlan import ResolutionPlan
 from State.HelpDeskState import HelpDeskState
 from langchain_core.prompts import ChatPromptTemplate
-from Utils.Helpers import format_chat_history
+from Utils.Helpers import fetch_user_ltm, format_chat_history
 from Utils.Logger import get_logger
+from langchain_core.runnables.config import RunnableConfig
+from langgraph.store.base import BaseStore
+
 
 logger = get_logger("ORCHESTRATOR")
 
-def orchestrator_node(state: HelpDeskState):
-    logger.info("Drafting plan with memory")
+def orchestrator_node(state: HelpDeskState, config: RunnableConfig, store: BaseStore):
+    logger.info("--- 🧠 RUNNING ORCHESTRATOR ---")
+    logger.info("Drafting resolution plan with memory context")
     
     docs = state.get("documents", [])
     question = state.get("question", "")
-    ltm_facts = state.get("long_term_facts", "No known facts.")
+    # ltm_facts = state.get("long_term_facts", "No known facts.")
+    ltm_facts = fetch_user_ltm(config, store)
     stm_history = format_chat_history(state.get("messages", []))
     
     # Safely format docs in case metadata is missing
     doc_text = "\n\n".join([f"Source: {d.get('metadata', 'Unknown')}\nContent: {d.get('content', '')}" for d in docs])
-    
-    # ==========================================
-    # 🚨 FORCED SANITIZATION 🚨
-    # Scrubbing the raw state data before Azure sees it
-    # ==========================================
-    replacements = {
-            "symptoms": "indicators", "Symptoms": "Indicators", "SYMPTOMS": "INDICATORS",
-            "symptom": "indicator", "Symptom": "Indicator", "SYMPTOM": "INDICATOR",
-            "diagnosis": "root cause analysis", "Diagnosis": "Root Cause Analysis", "DIAGNOSIS": "ROOT CAUSE ANALYSIS",
-            "treatment": "resolution", "Treatment": "Resolution", "TREATMENT": "RESOLUTION",
-            "patient": "system", "Patient": "System", "PATIENT": "SYSTEM",
-            "severity": "impact", "Severity": "Impact", "SEVERITY": "IMPACT",
-            "priority": "level", "Priority": "Level", "PRIORITY": "LEVEL",
-            "triage": "sort", "Triage": "Sort", "TRIAGE": "SORT"
-        }
-
-    safe_question = question
-    safe_stm_history = stm_history
-    safe_ltm_facts = ltm_facts
-    safe_doc_text = doc_text
-
-    for bad_word, good_word in replacements.items():
-        safe_question = safe_question.replace(bad_word, good_word)
-        safe_stm_history = safe_stm_history.replace(bad_word, good_word)
-        safe_ltm_facts = safe_ltm_facts.replace(bad_word, good_word)
-        safe_doc_text = safe_doc_text.replace(bad_word, good_word)
 
     structured_llm = primary_llm.with_structured_output(ResolutionPlan)
     
@@ -66,21 +45,20 @@ def orchestrator_node(state: HelpDeskState):
     chain = prompt | structured_llm
     
     try:
-        # Pass the SANITIZED variables to the LLM
         plan = chain.invoke({
-            "ltm_facts": safe_ltm_facts,
-            "stm_history": safe_stm_history,
-            "question": safe_question, 
-            "doc_text": safe_doc_text
+            "ltm_facts": ltm_facts,
+            "stm_history": stm_history,
+            "question": question, 
+            "doc_text": doc_text
         })
         
-        return {"tasks": plan.tasks}
+        return {"tasks": [task.model_dump() for task in plan.tasks]}
         
     except Exception as e:
-        logger.error(f"Azure Filter Blocked: {e}")
+        logger.error(f"Plan generation failed: {e}")
         # FALLBACK: Provide default tasks to prevent the UI from crashing
         return {"tasks": [
-            "Analyze the root cause of the indicator", 
-            "Provide step-by-step resolution", 
-            "Offer preventive advice"
+            {"title": "Root Cause Analysis", "objective": "Analyze the root cause", "technical_requirements": []}, 
+            {"title": "Resolution Steps", "objective": "Provide step-by-step resolution", "technical_requirements": []}, 
+            {"title": "Preventive Advice", "objective": "Offer preventive advice", "technical_requirements": []}
         ]}

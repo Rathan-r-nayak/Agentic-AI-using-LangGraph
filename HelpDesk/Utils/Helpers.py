@@ -2,6 +2,9 @@ import base64
 import mimetypes
 from langchain_core.messages import HumanMessage
 from Utils.Logger import get_logger
+from langchain_core.runnables.config import RunnableConfig
+from langgraph.store.base import BaseStore
+
 
 # Import your primary model for vision tasks
 from Config.LLMConfig import primary_llm 
@@ -16,16 +19,59 @@ def format_chat_history(messages) -> str:
     if not messages:
         return "No previous conversation."
     
-    # Grab the last 6 messages to keep the context window focused and cheap
     recent_msgs = messages[-6:]
     formatted = []
     
     for msg in recent_msgs:
-        # Map LangChain message types to standard roles
-        role = "User" if msg.type == "human" else "AI"
-        formatted.append(f"{role}: {msg.content}")
+        # Handle LangChain Message Objects
+        if hasattr(msg, "type"):
+            role = "User" if msg.type == "human" else "AI"
+            content = msg.content
+        # Handle Raw Dictionaries (Streamlit fallback)
+        elif isinstance(msg, dict):
+            role = "User" if msg.get("role") == "user" else "AI"
+            content = msg.get("content", "")
+        else:
+            continue
+            
+        formatted.append(f"{role}: {content}")
         
     return "\n".join(formatted)
+
+
+def fetch_user_ltm(config: RunnableConfig, store: BaseStore) -> str:
+    """
+    Safely fetches and formats Long-Term Memory (LTM) facts for a user from the BaseStore.
+    """
+    user_id = config.get("configurable", {}).get("user_id", "default_user")
+    namespace = ("user", user_id, "details")
+
+    try:
+        user_memory = store.search(namespace)
+        
+        if user_memory:
+            # Safely extract the data depending on how it was saved (handles strings or lists)
+            facts_list = []
+            for item in user_memory:
+                # Adjust 'data' to 'facts' if you saved your dictionary key as {"facts": [...]}
+                val = item.value.get("data", item.value.get("facts", "")) 
+                if isinstance(val, list):
+                    facts_list.extend(val)
+                else:
+                    facts_list.append(str(val))
+                    
+            long_term_facts = "\n".join(facts_list)
+            logger.info(f"Loaded LTM for '{user_id}'")
+            return long_term_facts
+            
+    except Exception as e:
+        logger.error(f"Error fetching LTM: {e}")
+        
+    logger.info(f"No existing LTM found for '{user_id}'")
+    return "No previous memory."
+
+
+
 
 def analyze_image_context(image_path: str) -> str:
     """
