@@ -13,3 +13,6 @@
 *.vscode
 *.venv
 *.sh
+__pycache__/
+*.py[cod]
+.venv/

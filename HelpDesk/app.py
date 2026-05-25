@@ -100,48 +100,67 @@ if role == "🛡️ IT Admin":
     st.header("Knowledge Base Manager")
     st.write("Upload technical manuals or policy docs to the Azure-powered Vector Store.")
     
-    # Fetch data dynamically from FastAPI
+    # 1. Fetch data dynamically from FastAPI (list of dicts)
     catalog_data = fetch_system_catalog()
 
-    catalog_options = []
+    # 2. Build a structured mapping dictionary instead of flat composite strings
+    # Format: {"IT Services": {"Hardware Support", "Software Licensing"}, ...}
+    category_mapping = {}
     if catalog_data and isinstance(catalog_data, list):
-        # The JSON is a flat list of dicts, so we can build the set directly
-        unique_mappings = {
-            f"{item.get('catalog_category', '')} - {item.get('catalog_item', '')}" 
-            for item in catalog_data 
-            if 'catalog_category' in item and 'catalog_item' in item
-        }
-        catalog_options = sorted(list(unique_mappings))
+        for item in catalog_data:
+            cat = item.get("catalog_category")
+            itm = item.get("catalog_item")
+            if cat and itm:
+                if cat not in category_mapping:
+                    category_mapping[cat] = set()
+                category_mapping[cat].add(itm)
 
-    # Fallback if the cache is still empty
-    if not catalog_options:
-        catalog_options = ["No valid categories found"]
+    # 3. Handle fallbacks gracefully if the backend response is empty
+    if not category_mapping:
+        category_mapping = {"No valid categories found": ["No valid items found"]}
+
+    # Extract unique, sorted categories for the first dropdown
+    available_categories = sorted(list(category_mapping.keys()))
 
     # --- UPLOAD & ASSIGN UI ---
     col1, col2 = st.columns([2, 1])
     with col1:
         uploaded_files = st.file_uploader("Select PDFs or Text files", type=["pdf", "txt"], accept_multiple_files=True)
+    
     with col2:
-        # Display the combined category and items dynamically!
-        selected_target = st.selectbox("Assign Technical Scope", options=catalog_options)
+        # Step A: Admin selects the main Core Category Domain
+        selected_category = st.selectbox(
+            "Assign Core Category", 
+            options=available_categories
+        )
+        
+        # Step B: Dynamically resolve and sort items tied ONLY to that selected category
+        matching_items = sorted(list(category_mapping.get(selected_category, [])))
+        
+        # Step C: Admin selects the sub-scope item from the filtered subset
+        selected_item = st.selectbox(
+            "Assign Technical Scope Item", 
+            options=matching_items
+        )
 
     # --- INDEXING LOGIC ---
     if st.button("🚀 Index to Vector DB"):
         if uploaded_files:
-            # Extract just the category portion to pass down to your original document processor
-            # e.g., "IT Services - Hardware Support" -> "IT Services"
-            category_only = selected_target.split(" - ")[0]
-            
+            # Look up values directly without string splitting (.split(" - ")) acrobatics
+            if selected_category == "No valid categories found":
+                st.error("Cannot index documents to an invalid catalog destination.")
+                st.stop()
+
             temp_files_info = []
             for uploaded_file in uploaded_files:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_file.name) as tmp:
                     tmp.write(uploaded_file.getbuffer())
-                    # FIX: Ensure this is a tuple (temp_path, original_filename)
                     temp_files_info.append((tmp.name, uploaded_file.name)) 
 
             with st.spinner("Processing and chunking files..."):
-                # FIX: Pass the list of tuples, NOT the list of strings
-                success = process_and_index_files(temp_files_info, category_only)
+                # 💡 ADJUSTMENT NOTE: If your backend endpoint 'process_and_index_files' 
+                # has been upgraded to take both fields separately, update it right here:
+                success = process_and_index_files(temp_files_info, selected_category, selected_item)
             
             # Clean up temp files from disk
             for path, _ in temp_files_info:
@@ -149,7 +168,7 @@ if role == "🛡️ IT Admin":
                     os.remove(path)
             
             if success:
-                st.success(f"Successfully indexed {len(uploaded_files)} files!")
+                st.success(f"Successfully indexed {len(uploaded_files)} files under {selected_category} -> {selected_item}!")
             else:
                 st.error("Something went wrong during indexing.")
         else:
@@ -158,13 +177,11 @@ if role == "🛡️ IT Admin":
     # --- VIEW CURRENT KNOWLEDGE BASE ---
     st.divider()
     st.subheader("📚 Current Knowledge Base")
-    # This now returns a list of strings: ["file1.pdf", "file2.txt"]
     indexed_files = get_indexed_files()
     
     if indexed_files:
         with st.expander(f"View {len(indexed_files)} Indexed Documents"):
             for idx, filename in enumerate(indexed_files, 1):
-                # Since we only have the filename string, we display it directly
                 st.markdown(f"**{idx}.** {filename}")
     else:
         st.info("No documents are currently indexed in the Vector DB.")

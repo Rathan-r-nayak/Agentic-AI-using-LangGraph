@@ -6,7 +6,7 @@ from Utils.Logger import get_logger
 
 logger = get_logger("DOCUMENT_PROCESSOR")
 
-def process_and_index_files(file_info_list: list, category: str):
+def process_and_index_files(file_info_list: list, category: str, item: str):
     """
     Processes files and indexes them into ChromaDB.
     Expected input: file_info_list = [(temp_path, original_filename), ...]
@@ -31,10 +31,10 @@ def process_and_index_files(file_info_list: list, category: str):
             splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
             chunks = splitter.split_documents(documents)
             
-            # 4. Inject Metadata (Using the ORIGINAL filename provided from UI)
+            # 4. Inject Metadata (Aligned with Ticket schema)
             for chunk in chunks:
-                chunk.metadata["category"] = category
-                chunk.metadata["application_name"] = "None"
+                chunk.metadata["catalog_category"] = category
+                chunk.metadata["catalog_item"] = item
                 chunk.metadata["source"] = original_name
             
             all_chunks.extend(chunks)
