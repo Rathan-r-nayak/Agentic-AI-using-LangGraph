@@ -1,16 +1,19 @@
-import asyncio
 from contextlib import AsyncExitStack
-from typing import Optional, List, Any
-
+from typing import List, Optional
+from langchain_core.tools import tool, BaseTool
 from mcp import ClientSession
 from mcp.client.sse import sse_client
-from langchain_core.tools import tool, BaseTool
+from Utils.Logger import get_logger
+
+
+logger = get_logger("MAIN")
+
 
 class ChatbotMCPClient:
     def __init__(self, sse_url: str):
         """
         Initialize the client with the FastAPI SSE endpoint.
-        Example: 'http://127.0.0.1:8000/sse'
+        Example: 'http://127.0.0.1:8000/mcp/sse'
         """
         self.sse_url = sse_url
         self.session: Optional[ClientSession] = None
@@ -18,22 +21,25 @@ class ChatbotMCPClient:
 
     async def connect(self):
         """Establish the SSE connection to the FastAPI MCP server."""
-        print(f"🔄 Connecting to MCP Server at {self.sse_url}...")
-        
+        logger.info(f"🔄 Connecting to MCP Server at {self.sse_url}...")
+
         # Connect to the SSE endpoint exposed by FastMCP in FastAPI
         sse_transport = await self.exit_stack.enter_async_context(sse_client(self.sse_url))
         self.read, self.write = sse_transport
 
-        # Initialize the session
         self.session = await self.exit_stack.enter_async_context(ClientSession(self.read, self.write))
+        #read:for listening to data coming from the server
+        #write:for sending tool requests to the server
+
         await self.session.initialize()
-        
-        print("✅ Successfully connected to MCP Server!")
+        logger.info("✅ Successfully connected to MCP Server!")
+
 
     async def disconnect(self):
         """Cleanly shut down the connection."""
         await self.exit_stack.aclose()
-        print("🛑 Disconnected from MCP Server.")
+        logger.info("🛑 Disconnected from MCP Server.")
+
 
     def get_tools(self) -> List[BaseTool]:
         """

@@ -43,6 +43,9 @@ def fetch_user_ltm(config: RunnableConfig, store: BaseStore) -> str:
     """
     Safely fetches and formats Long-Term Memory (LTM) facts for a user from the BaseStore.
     """
+    if store is None:
+        return "No known facts."
+    
     user_id = config.get("configurable", {}).get("user_id", "default_user")
     namespace = ("user", user_id, "details")
 

@@ -14,16 +14,15 @@ logger = get_logger("REMEMBER")
 def remember_node(state: HelpDeskState, config: RunnableConfig, store: BaseStore) -> Dict[str, Any]:
     logger.info("--- 🧠 RUNNING MEMORY EXTRACTION ---")
 
-
-    messages = state.get("generation", "NO MESSAGE PREVIEW")
-    if not messages:
-        logger.info(f"🤖 AI RES : {messages}")
-        print("=" * 100)
-        return {}
+    # 1. Get the actual list of chat messages for memory extraction
+    chat_history = state.get("messages", [])
+    
+    # 2. Get the final AI response just for your console logging
+    final_generation = state.get("generation", "NO MESSAGE PREVIEW")
 
     # --- BULLETPROOF HUMAN MESSAGE FILTER ---
     human_messages = []
-    for msg in messages:
+    for msg in chat_history: # 👈 Loop over the actual list, not the text string!
         if hasattr(msg, "type") and msg.type == "human":
             human_messages.append(msg.content)
         elif isinstance(msg, dict) and msg.get("role") == "user":
@@ -31,13 +30,14 @@ def remember_node(state: HelpDeskState, config: RunnableConfig, store: BaseStore
 
     if not human_messages:
         logger.warning("No human messages found to analyze.")
-        logger.info(f"🤖 AI RES : {messages}")
+        logger.info(f"🤖 AI RES : {final_generation}")
         print("=" * 100)
         return {}
 
     last_user_message = human_messages[-1].strip()
+    
     if not last_user_message:
-        logger.info(f"🤖 AI RES : {messages}")
+        logger.info(f"🤖 AI RES : {final_generation}")
         print("=" * 100)
         return {}
 

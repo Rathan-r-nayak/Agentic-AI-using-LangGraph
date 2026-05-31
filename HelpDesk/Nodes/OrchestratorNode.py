@@ -19,6 +19,16 @@ def orchestrator_node(state: HelpDeskState, config: RunnableConfig, store: BaseS
     # ltm_facts = state.get("long_term_facts", "No known facts.")
     ltm_facts = fetch_user_ltm(config, store)
     stm_history = format_chat_history(state.get("messages", []))
+
+    mcp_tools = config.get("configurable", {}).get("mcp_tools", [])
+
+    if mcp_tools:
+        tool_descriptions = "\n".join([
+            f"- Tool Name: '{tool.name}' | Description: {tool.description}" 
+            for tool in mcp_tools
+        ])
+    else:
+        tool_descriptions = "- No external tools currently available."
     
     # Safely format docs in case metadata is missing
     doc_text = "\n\n".join([f"Source: {d.get('metadata', 'Unknown')}\nContent: {d.get('content', '')}" for d in docs])
@@ -33,11 +43,18 @@ def orchestrator_node(state: HelpDeskState, config: RunnableConfig, store: BaseS
         - User Facts (Long-Term): {ltm_facts}
         - Recent Chat (Short-Term): {stm_history}
         
+        AVAILABLE WORKER CAPABILITIES (TOOLS):
+        Your worker technicians have access to the following real-time systems. 
+        If a user's issue requires checking database records, viewing ticket status, or creating a ticket, explicitly instruct the worker to use the relevant tool below.
+        
+        {tool_descriptions}
+        
         Instructions:
         1. Tailor the tasks to the User's OS, Environment, and Role found in the 'Facts'.
         2. If the 'Recent Chat' shows they already tried a step, instruct the workers NOT to suggest it again.
         3. Mandatory Tasks: 'root_cause', 'resolution_steps', 'preventive_advice'.
-        4. Strictly use IT and engineering terminology. Avoid all medical analogies.
+        4. If required, add an execution task telling a worker to use a specific tool from the capabilities list.
+        5. Strictly use IT and engineering terminology. Avoid all medical analogies.
         """),
         ("human", "Current Issue: {question}\n\nRetrieved Manuals:\n{doc_text}")
     ])
@@ -49,7 +66,8 @@ def orchestrator_node(state: HelpDeskState, config: RunnableConfig, store: BaseS
             "ltm_facts": ltm_facts,
             "stm_history": stm_history,
             "question": question, 
-            "doc_text": doc_text
+            "doc_text": doc_text,
+            "tool_descriptions": tool_descriptions
         })
         
         return {"tasks": [task.model_dump() for task in plan.tasks]}

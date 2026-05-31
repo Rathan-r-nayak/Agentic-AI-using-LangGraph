@@ -22,6 +22,8 @@ from Nodes.CritiqueNode import critique_node
 from Nodes.RememberNode import remember_node
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.store.postgres import PostgresStore
+from psycopg_pool import AsyncConnectionPool
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import ConnectionPool
 from Utils.Logger import get_logger
 import os
@@ -111,26 +113,28 @@ workflow.add_edge("remember_node", END)
 def get_compiled_app():
     logger.info("Initializing Postgres connection pool and compiling graph...")
     
-    pool = ConnectionPool(
-        conninfo=DB_URI,
-        max_size=20,
-        kwargs={"autocommit": True} 
-    )
 
-    # Setup Checkpointer (STM)
-    checkpointer = PostgresSaver(pool)
-    checkpointer.setup() 
+    return workflow
+    # pool = ConnectionPool(
+    #     conninfo=DB_URI,
+    #     max_size=20,
+    #     kwargs={"autocommit": True} 
+    # )
 
-    # Setup Store (LTM)
-    store = PostgresStore(pool)
-    store.setup()
+    # # Setup Checkpointer (STM)
+    # checkpointer = AsyncPostgresSaver(pool)
+    # checkpointer.setup() 
 
-    # Compile and return the app
-    app = workflow.compile(
-        checkpointer=checkpointer, 
-        store=store,
-        interrupt_before=["web_search_node"]
-    )
+    # # Setup Store (LTM)
+    # store = AsyncConnectionPool(pool)
+    # store.setup()
+
+    # # Compile and return the app
+    # app = workflow.compile(
+    #     checkpointer=checkpointer, 
+    #     store=store,
+    #     interrupt_before=["web_search_node"]
+    # )
     
-    logger.info("Graph compiled successfully")
-    return app
+    # logger.info("Graph compiled successfully")
+    # return app
