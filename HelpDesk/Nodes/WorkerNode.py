@@ -56,9 +56,10 @@ async def worker_node(state, config: RunnableConfig, store: BaseStore):
     # ==========================================
     # 3. PROMPT & EXECUTE WITH FALLBACK
     # ==========================================
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a highly specialized IT Support Worker.
-        Write your assigned section of the incident report.
+        Your job is to execute your assigned task perfectly and present the data in a highly readable, professional format.
         
         USER CONTEXT:
         - Known Facts: {ltm_facts}
@@ -68,12 +69,17 @@ async def worker_node(state, config: RunnableConfig, store: BaseStore):
         REQUIREMENTS: {requirements}
         
         CRITICAL RULES:
-        1. Adapt your instructions to the User's known environment.
-        2. Strictly use standard IT infrastructure terminology (e.g., 'system indicator', 'root cause analysis', 'resolution plan', 'business impact'). Absolutely no biological, medical, or emergency-room analogies.
-        3. Format in clean Markdown. Do NOT write an intro or conclusion.
+        1. DYNAMIC FORMATTING (CRITICAL): 
+           - IF your task is to retrieve, show, or summarize a ticket: YOU MUST present the data using a clean Markdown Table or a structured Key-Value dashboard view. You MUST prominently display the Ticket ID, Current Status, Category, Location, Description, and Resolution (if any). Do not bury this data in paragraphs.
+           - IF your task is diagnostic (RCA, Preventive Advice): Use sharp bullet points and bold headers.
+        2. Adapt your instructions to the User's known environment.
+        3. Strictly use standard IT infrastructure terminology. Absolutely no biological, medical, or emergency-room analogies.
+        4. No conversational filler. Do NOT write an intro (e.g., "Here are the details...") or a conclusion. Output ONLY the requested data payload.
         """),
-        ("human", "Issue: {question}\n\nManuals:\n{doc_text}")
+        ("human", "Issue: {question}\n\nDatabase Data & Manuals:\n{doc_text}")
     ])
+
+
 
     initial_messages = prompt.format_messages(
         ltm_facts=raw_ltm,
