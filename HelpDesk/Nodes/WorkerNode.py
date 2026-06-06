@@ -1,6 +1,6 @@
 from langchain.messages import ToolMessage
 
-from Config.LLMConfig import primary_llm
+from Config.LLMConfig import primary_llm, openrouter_llm, gemma_llm, reasoning_llm
 from langchain_core.prompts import ChatPromptTemplate
 from Utils.Helpers import fetch_user_ltm
 from Utils.Logger import get_logger
@@ -34,7 +34,7 @@ async def worker_node(state, config: RunnableConfig, store: BaseStore):
     logger.info(f"Executing: {task_title}")
 
     mcp_tools = config.get("configurable", {}).get("mcp_tools", [])
-    llm_with_tools = primary_llm.bind_tools(mcp_tools)
+    llm_with_tools = reasoning_llm.bind_tools(mcp_tools)
     
 
     # ==========================================

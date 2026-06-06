@@ -1,4 +1,4 @@
-from Config.LLMConfig import primary_llm
+from Config.LLMConfig import primary_llm, fast_llm, openrouter_llm, gemma_llm
 from Schema.ResolutionPlan import ResolutionPlan
 from State.HelpDeskState import HelpDeskState
 from langchain_core.prompts import ChatPromptTemplate
@@ -33,28 +33,37 @@ def orchestrator_node(state: HelpDeskState, config: RunnableConfig, store: BaseS
     # Safely format docs in case metadata is missing
     doc_text = "\n\n".join([f"Source: {d.get('metadata', 'Unknown')}\nContent: {d.get('content', '')}" for d in docs])
 
-    structured_llm = primary_llm.with_structured_output(ResolutionPlan)
-    
+    structured_llm = gemma_llm.with_structured_output(ResolutionPlan)
+
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are the L3 Lead IT Service Manager.
-        Create a 'Resolution Plan' with parallel tasks for your workers.
+        ("system", """You are the L3 Lead IT Service Manager operating as a high-velocity Triage Orchestrator.
+        Your job is to parse the user's issue and compile a targeted 'Resolution Plan' containing discrete execution tasks for your worker nodes.
         
         CRITICAL CONTEXT:
-        - User Facts (Long-Term): {ltm_facts}
-        - Recent Chat (Short-Term): {stm_history}
+        - User Environment & Profile (Long-Term): {ltm_facts}
+        - Chat History (Short-Term): {stm_history}
         
         AVAILABLE WORKER CAPABILITIES (TOOLS):
-        Your worker technicians have access to the following real-time systems. 
-        If a user's issue requires checking database records, viewing ticket status, or creating a ticket, explicitly instruct the worker to use the relevant tool below.
-        
         {tool_descriptions}
         
-        Instructions:
-        1. Tailor the tasks to the User's OS, Environment, and Role found in the 'Facts'.
-        2. If the 'Recent Chat' shows they already tried a step, instruct the workers NOT to suggest it again.
-        3. Mandatory Tasks: 'root_cause', 'resolution_steps', 'preventive_advice'.
-        4. If required, add an execution task telling a worker to use a specific tool from the capabilities list.
-        5. Strictly use IT and engineering terminology. Avoid all medical analogies.
+        ORCHESTRATION MODES & DYNAMIC TASK RULES:
+        
+        MODE A: DATA LOOKUP / STATUS QUERY (e.g., "Give me details for ticket X", "What is the status of issue Y")
+        - CRITICAL: Generate EXACTLY ONE task: 'Retrieve Ticket Details'.
+        - Instruct the worker to execute the relevant retrieval tool from the capabilities list.
+        - DO NOT generate tasks for root cause analysis, preventive advice, or escalation. The user is only looking for real-time status parameters.
+        
+        MODE B: LIVE INCIDENT RESOLUTION (e.g., "My database connection is failing", "The screen has vertical lines")
+        - Generate focused, parallel technical tasks based on the following rules:
+          1. 'root_cause': Analyze logs or structural context to isolate the breakdown mechanism.
+          2. 'resolution_steps': Formulate deterministic remediation workflows.
+          3. 'preventive_advice': Engineering recommendations to avoid regression.
+          4. 'escalation' (Optional): Trigger only if initial isolation steps are projected to breach SLA parameters or require tier-3 privileges.
+        
+        TASK ENGINEERING INSTRUCTIONS:
+        1. Tailor all plan parameters to the User's explicit OS, shell environment, and development dependencies extracted from 'User Environment & Profile'.
+        2. Inspect 'Chat History'. If the user has already executed an administrative action or troubleshooting step, explicitly instruct workers to skip that step and proceed to next-hop diagnostics.
+        3. Maintain a strict engineering and IT infrastructure taxonomy. Avoid all medical or healthcare analogies completely.
         """),
         ("human", "Current Issue: {question}\n\nRetrieved Manuals:\n{doc_text}")
     ])

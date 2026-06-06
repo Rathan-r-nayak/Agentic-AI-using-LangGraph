@@ -1,5 +1,5 @@
 from typing import Dict, Any
-from Config.LLMConfig import primary_llm
+from Config.LLMConfig import primary_llm, fast_llm
 from Schema.CritiqueReview import CritiqueReview
 from State.HelpDeskState import HelpDeskState
 from langchain_core.prompts import ChatPromptTemplate
@@ -15,17 +15,23 @@ def critique_node(state: HelpDeskState) -> Dict[str, Any]:
         logger.warning("No generation text found to critique.")
         return {}
     
-    structured_llm = primary_llm.with_structured_output(CritiqueReview)
+    structured_llm = fast_llm.with_structured_output(CritiqueReview)
     
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are the Compliance & Safety Officer for Helpdesk AI.
-        Review the proposed IT resolution text.
+        Review the proposed IT resolution text. 
+        
+        You MUST respond with a raw JSON object containing exactly these fields:
+        {{
+            "is_safe": boolean,
+            "reasoning": "string explanation",
+            "scrubbed_text": "the clean resolution string"
+        }}
         
         RULES:
-        1. No Passwords: If the text tells the user a raw password, remove it and tell them to 'use their secure credentials'.
-        2. Tone: Ensure the tone is highly professional and empathetic. No condescending language.
-        3. If you find a violation, set is_safe to False and rewrite the text in 'scrubbed_text'.
-        4. If it is safe, set is_safe to True and return the exact same text in 'scrubbed_text'.
+        1. No Passwords: If the text tells the user a raw password (like in database strings), change it to placeholders like '<username>' or tell them to 'use secure credentials'.
+        2. If safe, set is_safe to true and copy the input text exactly into 'scrubbed_text'.
+        3. Do not include markdown blocks like ```json in your response. Only return raw JSON text.
         """),
         ("human", "Proposed Resolution:\n{generation}")
     ])

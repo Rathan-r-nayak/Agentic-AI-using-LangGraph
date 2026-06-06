@@ -53,6 +53,27 @@ fast_llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.5)
 
 embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
+openrouter_key = os.getenv("OPENROUTER_API_KEY")
+
+# High-availability, free auto-balancing model for quick tasks (like Evaluator / Query Analyzer)
+openrouter_llm = ChatOpenAI(
+    openai_api_key=openrouter_key,
+    openai_api_base="https://openrouter.ai/api/v1",
+    model="openrouter/free", 
+    temperature=0.1,
+    default_headers={
+        "HTTP-Referer": "http://localhost:3000",
+        "X-Title": "Smart Helpdesk Triage App"
+    }
+)
+
+gemma_llm = ChatOpenAI(
+    model="gemma2:2b",
+    openai_api_key="ollama", # Placeholder string to pass LangChain initialization checks
+    openai_api_base="http://localhost:11434/v1", # Native Ollama local port mapping
+    temperature=0.3,
+)
+
 
 # primary_llm = ChatOpenAI(
 #     base_url=BASE_URL,

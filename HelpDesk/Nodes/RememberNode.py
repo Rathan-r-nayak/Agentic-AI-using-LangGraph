@@ -98,7 +98,7 @@ def remember_node(state: HelpDeskState, config: RunnableConfig, store: BaseStore
 
     logger.info("--- MEMORY EXTRACTION COMPLETED ---")
 
-    logger.info(f"🤖 AI RES : {messages}")
+    logger.info(f"🤖 AI RES : {final_generation}")
     print("=" * 100)
     # Return empty dict since we wrote to the BaseStore, not the State Channel
     return {}

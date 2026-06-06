@@ -59,6 +59,7 @@ def fetch_system_catalog():
 async def fetch_history_async(config_dict):
     """Safely fetch chat history from the async checkpointer."""
     async with AsyncPostgresSaver.from_conn_string(DB_URI) as checkpointer:
+        await checkpointer.setup()
         app = get_compiled_app().compile(checkpointer=checkpointer)
         state = await app.aget_state(config_dict)
         formatted_messages = []
@@ -277,12 +278,15 @@ else:
             if next_state and next_state.next:
                 st.rerun()
             else:
-                # Extract the output cleanly
+                # 👇 UPDATED EXTRACTION LOGIC 👇
                 if result and isinstance(result, dict):
-                    if "messages" in result and len(result["messages"]) > 0:
+                    # 1. Look for the 'generation' key first!
+                    if "generation" in result and result["generation"]:
+                        response = result["generation"]
+                    # 2. Fallback to messages
+                    elif "messages" in result and len(result["messages"]) > 0:
                         response = result["messages"][-1].content
-                    elif "worker_results" in result:
-                        response = "\n\n".join(result["worker_results"])
+                    # 3. Fallback to raw string
                     else:
                         response = str(result)
                 else:
