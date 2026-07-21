@@ -1,0 +1,113 @@
+import httpx
+import os
+import ssl
+import warnings
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_ollama import ChatOllama
+from urllib3.exceptions import InsecureRequestWarning
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings, ChatOpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Retrieve the key from environment variables
+# If the key is missing, it will return None
+# API_KEY = os.getenv("TCS_API_KEY")
+
+
+# if not API_KEY:
+#     raise ValueError("TCS_API_KEY not found! Ensure your .env file is set up correctly.")
+
+
+# ==========================================
+# 1. LAB ENVIRONMENT SSL BYPASS
+# ==========================================
+# This ensures you don't get SSL errors in the TCS lab environment
+# ssl._create_default_https_context = ssl._create_unverified_context
+# os.environ['REQUESTS_CA_BUNDLE'] = ''
+# os.environ['CURL_CA_BUNDLE'] = ''
+# warnings.simplefilter('ignore', InsecureRequestWarning)
+
+# Initialize the persistent client
+# client = httpx.Client(verify=False, timeout=120.0)
+
+# ==========================================
+# 2. CONFIGURATION & KEYS
+# ==========================================
+# BASE_URL = "https://genailab.tcs.in"
+
+
+
+
+# ==========================================
+# 3. LLM INITIALIZATIONS
+# ==========================================
+
+primary_llm = ChatGoogleGenerativeAI(model='models/gemini-2.5-flash', temperature=0)
+
+reasoning_llm = ChatOllama(model="llama3.2", temperature=0)
+
+fast_llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.5)
+
+embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+openrouter_key = os.getenv("OPENROUTER_API_KEY")
+
+# High-availability, free auto-balancing model for quick tasks (like Evaluator / Query Analyzer)
+openrouter_llm = ChatOpenAI(
+    openai_api_key=openrouter_key,
+    openai_api_base="https://openrouter.ai/api/v1",
+    model="openrouter/free", 
+    temperature=0.1,
+    default_headers={
+        "HTTP-Referer": "http://localhost:3000",
+        "X-Title": "Smart Helpdesk Triage App"
+    }
+)
+
+gemma_llm = ChatOpenAI(
+    model="gemma2:2b",
+    openai_api_key="ollama", # Placeholder string to pass LangChain initialization checks
+    openai_api_base="http://localhost:11434/v1", # Native Ollama local port mapping
+    temperature=0.3,
+)
+
+
+# primary_llm = ChatOpenAI(
+#     base_url=BASE_URL,
+#     model="azure/genailab-maas-gpt-4o",  # Back to a working deployment
+#     api_key=API_KEY,
+#     http_client=client,
+#     temperature=0.2
+# )
+
+# (Keep your fast_llm and reasoning_llm as they were)
+
+# FAST LLM: For Routing, Classification, and Summarization
+# fast_llm = ChatOpenAI(
+#     base_url=BASE_URL,
+#     model="azure/genailab-maas-gpt-4o-mini", 
+#     api_key=API_KEY,
+#     http_client=client,
+#     temperature=0
+# )
+
+# # REASONING LLM: Specifically for your Orchestrator node
+# reasoning_llm = ChatOpenAI(
+#     base_url=BASE_URL,
+#     model="azure_ai/genailab-maas-DeepSeek-R1", 
+#     api_key=API_KEY,
+#     http_client=client,
+#     temperature=0.1
+# )
+
+
+# embedding_model = AzureOpenAIEmbeddings(
+#     azure_endpoint=BASE_URL,
+#     azure_deployment="azure/genailab-maas-text-embedding-3-large",
+#     api_key=API_KEY,
+#     openai_api_version="2023-05-15",
+#     http_client=client
+# )

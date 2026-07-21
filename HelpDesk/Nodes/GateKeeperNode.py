@@ -70,7 +70,7 @@ def gatekeeper_node(state: HelpDeskState, config: RunnableConfig, store: BaseSto
         ("human", "{question}")
     ])
     
-    chain = prompt | structured_llm  
+    chain = prompt | structured_llm 
     
     try:
         # The response is a strongly-typed GatekeeperDecision object
