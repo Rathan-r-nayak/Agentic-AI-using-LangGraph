@@ -1,9 +1,9 @@
 from langchain_classic.schema import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 
-from BankingApp.State import banking_state
-from BankingApp.Config.llm_config import primary_llm
-from BankingApp.Schema.primary_classifier import PrimaryClassifierDecision
+from State.banking_state import BankingState
+from Config.llm_config import primary_llm
+from Schema.primary_classifier import PrimaryClassifierDecision
 
 TRIAGE_SYSTEM_PROMPT = """You are the first line of defense for a secure Banking Assistant.
 Your job is to evaluate the user's latest message and route it appropriately.
@@ -17,7 +17,7 @@ from Utils.Logger import get_logger
 
 logger = get_logger("Primary Classifier")
 
-def triage_router(state: banking_state):
+def triage_router(state: BankingState):
     structured_llm = primary_llm.with_structured_output(PrimaryClassifierDecision)
 
     question = state.get("question", "")
@@ -27,11 +27,11 @@ def triage_router(state: banking_state):
 
     if not question:
         logger.warning("Empty question received in state.")
-        return {"requires_rag": False, "generation": "How can I help you today?"}
+        return {"requires_workflow": False, "generation": "How can I help you today?"}
     
     logger.info(f"User Query: '{question}'")
 
-    prompt = ChatPromptTemplate.from_template([
+    prompt = ChatPromptTemplate.from_messages([
         ("system", TRIAGE_SYSTEM_PROMPT),
         ("human", "{question}")
     ])
@@ -44,12 +44,12 @@ def triage_router(state: banking_state):
 
         if decision.is_workflow_required:
             return {
-                "requires_rag": True
+                "requires_workflow": True
             }
         else:
             new_message = AIMessage(content=decision.direct_response)
             return {
-                "requires_rag": False,
+                "requires_workflow": False,
                 "messages": [new_message],
                 "generation": decision.direct_response
             }
@@ -57,5 +57,5 @@ def triage_router(state: banking_state):
         logger.error(f"Primary classifier LLM extraction failed: {e}")
         logger.warning("Failsafe triggered: Defaulting to Action pipeline.")
         return {
-            "requires_rag": True
+            "requires_workflow": True
         }

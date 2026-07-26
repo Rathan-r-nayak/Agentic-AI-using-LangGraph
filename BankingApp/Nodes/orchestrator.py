@@ -1,7 +1,7 @@
 from langchain_core.prompts import ChatPromptTemplate
 
-from BankingApp.State import banking_state
-from BankingApp.Schema.task import Task, TaskPlan
+from State import banking_state
+from Schema.task import Task, TaskPlan
 from Utils.Logger import get_logger
 from Config.llm_config import primary_llm
 
@@ -23,7 +23,7 @@ def orchestrator_node(state: banking_state):
     
     structured_llm = primary_llm.with_structured_output(TaskPlan)
 
-    prompt = ChatPromptTemplate.from_template([
+    prompt = ChatPromptTemplate.from_messages([
         ("system", ORCHESTRATOR_SYSTEM_PROMPT),
         ("human", "{question}")
     ])

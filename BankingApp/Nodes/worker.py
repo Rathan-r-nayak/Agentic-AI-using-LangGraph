@@ -1,8 +1,15 @@
-from langchain.messages import HumanMessage
+from langchain.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
+from mcp import ClientSession
 
 from State.banking_state import WorkerState
 from Config.llm_config import primary_llm
+from Utils.mcp_client import fetch_mcp_tools 
+from mcp.client.sse import sse_client
+from langchain_mcp_adapters.tools import load_mcp_tools
+import traceback
+
+FASTMCP_SSE_URL = "http://127.0.0.1:8000/mcp/sse"
 
 
 # Assuming you fetch your tools dynamically from the MCP server here
@@ -15,44 +22,58 @@ Your objective is to execute the specific task assigned to you.
 Rules:
 1. Use the provided tools to fetch required information or execute actions.
 2. ALWAYS query the internal knowledge base first.
-3. Only use the web search tool (duckduckgo) if the internal KB returns insufficient data.
-4. Output your final answer clearly, using Markdown tables for tabular data.
+3. If the knowledge base contains a partial answer, output exactly what you found. Do not say the information is missing just because it is brief.
+4. If the internal KB returns NO relevant data, silently use the web search tool to find the answer. Do NOT ask the user for permission to search the web.
+5. Output your final answer clearly, using Markdown tables for tabular data if applicable.
 """
 
 # Compile the ReAct subgraph
-react_worker_graph = create_react_agent(
-    model=primary_llm,
-    tools=banking_tools,
-    state_modifier=WORKER_SYSTEM_PROMPT
-)
+# react_worker_graph = create_react_agent(
+#     model=primary_llm,
+#     tools=banking_tools,
+#     state_modifier=WORKER_SYSTEM_PROMPT
+# )
 
 from Utils.Logger import get_logger
 
 logger = get_logger("WORKER_NODE")
 
-def worker_node_function(state: WorkerState):
+async def worker_node_function(state: WorkerState):
     task = state["task"]
     logger.info(f"⚙️ WORKER STARTED: Executing Task -> {task.task_id}: {task.description}")
     
-    # create_react_agent expects a dict with a "messages" key
-    worker_input = {
-        "messages": [HumanMessage(content=f"Execute this task: {task.description}")]
-    }
-    
-    # Invoke the compiled ReAct subgraph
     try:
-        result = react_worker_graph.invoke(worker_input)
+        logger.info(f"🔌 Connecting to FastMCP Server at {FASTMCP_SSE_URL}...")
+
+        async with sse_client(FASTMCP_SSE_URL) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                
+                banking_tools = await load_mcp_tools(session=session)
+                logger.info(f"✅ Successfully loaded {len(banking_tools)} tools.")
+                
+                react_worker_graph = create_react_agent(
+                    model=primary_llm,
+                    tools=banking_tools
+                )
+                
+                worker_input = {
+                    "messages": [
+                        SystemMessage(content=WORKER_SYSTEM_PROMPT),
+                        HumanMessage(content=f"Execute this task: {task.description}")
+                    ]
+                }
+                
+                result = await react_worker_graph.ainvoke(worker_input)
+                
         
-        # Extract the final AI response from the ReAct agent's internal state
-        final_answer = result["messages"][-1].content
-        logger.info(f"✅ WORKER FINISHED: {task.task_id}")
-        
+                final_answer = result["messages"][-1].content
+                logger.info(f"✅ WORKER FINISHED: {task.task_id}, final_answer: {final_answer}")
     except Exception as e:
-        logger.error(f"Worker failed on task {task.task_id}: {e}")
+        error_details = traceback.format_exc()
+        logger.error(f"Worker failed on task {task.task_id}:\n{error_details}")
         final_answer = f"Error executing task: {str(e)}"
     
-    # Return a dictionary that targets the Annotated reducer in the parent BankingState
-    # The string is formatted to give context to the Synthesizer node later
     return {
         "worker_responses": [f"--- Result for {task.task_id} ---\n{final_answer}"]
     }
